@@ -116,26 +116,30 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 	diag := collect.Diagnose(raw, result)
 	inplace := detect.InPlace(raw.ServerVersion, raw.ResizeSubresource, raw.Nodes, raw.Pods)
 
-	// Optional peak-aware enrichment from Prometheus. Without it, verdicts rest
-	// on the HPA's instantaneous snapshot (blind to traffic spikes).
+	// Optional peak-aware enrichment from Prometheus. Without it — or if
+	// Prometheus is unreachable / returns nothing — verdicts rest on the HPA's
+	// instantaneous snapshot, and the header says so honestly.
 	workloads := result.Workloads
-	basisLabel := "instantaneous snapshot (HPA status / metrics-server)"
-	snapshotOnly := true
-	if o.promURL != "" {
+	promConfigured := o.promURL != ""
+	promReachable := false
+	if promConfigured {
 		pc, err := promq.NewClient(o.promURL)
 		if err != nil {
 			return err
 		}
-		popts := promq.DefaultOptions()
-		popts.Window = o.promWindow
-		popts.CPUQuantile = o.cpuQuantile
-		enriched, warns := promq.Enrich(ctx, pc, workloads, popts)
-		workloads = enriched
-		snapshotOnly = false
-		basisLabel = fmt.Sprintf("Prometheus peak — P%.0f CPU / max memory over %s",
-			o.cpuQuantile*100, o.promWindow)
-		for _, wmsg := range warns {
-			fmt.Fprintln(os.Stderr, "truce: prometheus:", wmsg)
+		if perr := pc.Ping(ctx); perr != nil {
+			// Don't fire dozens of doomed queries; fall back to snapshot loudly.
+			fmt.Fprintf(os.Stderr, "truce: prometheus: %v — falling back to snapshot\n", perr)
+		} else {
+			promReachable = true
+			popts := promq.DefaultOptions()
+			popts.Window = o.promWindow
+			popts.CPUQuantile = o.cpuQuantile
+			enriched, warns := promq.Enrich(ctx, pc, workloads, popts)
+			workloads = enriched
+			for _, wmsg := range warns {
+				fmt.Fprintln(os.Stderr, "truce: prometheus:", wmsg)
+			}
 		}
 	}
 
@@ -167,6 +171,10 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		rows = append(rows, a)
 	}
 
+	// Label the basis from what actually happened, not from intent — a SAFE
+	// verdict computed on a snapshot must never be dressed up as peak-aware.
+	basisLabel, snapshotOnly := basisStatus(rows, o, promConfigured, promReachable)
+
 	report := render.Report{
 		Cluster:         cluster,
 		Diagnostics:     diag,
@@ -186,6 +194,36 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 	}
 
 	return gateCheck(rows, failOn)
+}
+
+// basisStatus derives the honest usage-basis label and snapshot-only flag from
+// the actual per-row outcome: how many actionable workloads ended up with peak
+// data versus falling back to the snapshot.
+func basisStatus(rows []model.WorkloadAnalysis, o *options, configured, reachable bool) (label string, snapshotOnly bool) {
+	peak, actionable := 0, 0
+	for _, a := range rows {
+		if !a.Actionable {
+			continue
+		}
+		actionable++
+		if a.UsageBasis == model.BasisPeak {
+			peak++
+		}
+	}
+
+	switch {
+	case !configured:
+		return "instantaneous snapshot (HPA status / metrics-server)", true
+	case !reachable:
+		return fmt.Sprintf("snapshot — Prometheus UNREACHABLE at %s; every verdict fell back to the instantaneous snapshot", o.promURL), true
+	case peak == 0:
+		return fmt.Sprintf("snapshot — Prometheus reachable at %s but returned no usable data (check metric names / pod-name match); verdicts fell back to the snapshot", o.promURL), true
+	case peak < actionable:
+		return fmt.Sprintf("Prometheus peak (P%.0f CPU / max memory over %s) for %d of %d workloads; the rest fell back to snapshot — see stderr warnings",
+			o.cpuQuantile*100, o.promWindow, peak, actionable), false
+	default:
+		return fmt.Sprintf("Prometheus peak — P%.0f CPU / max memory over %s", o.cpuQuantile*100, o.promWindow), false
+	}
 }
 
 // resolveScope determines the namespace scope and a human label for the header.

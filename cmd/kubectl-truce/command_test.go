@@ -1,10 +1,44 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/heinanca/truce/internal/model"
 )
+
+func TestBasisStatus(t *testing.T) {
+	o := &options{promURL: "http://localhost:9090", promWindow: "7d", cpuQuantile: 0.95}
+	peakRow := model.WorkloadAnalysis{Actionable: true, UsageBasis: model.BasisPeak}
+	snapRow := model.WorkloadAnalysis{Actionable: true, UsageBasis: model.BasisSnapshot}
+	rows := []model.WorkloadAnalysis{peakRow, snapRow}
+
+	tests := []struct {
+		name         string
+		rows         []model.WorkloadAnalysis
+		configured   bool
+		reachable    bool
+		wantSnap     bool
+		wantContains string
+	}{
+		{"not configured", rows, false, false, true, "snapshot"},
+		{"unreachable", []model.WorkloadAnalysis{snapRow, snapRow}, true, false, true, "UNREACHABLE"},
+		{"reachable no data", []model.WorkloadAnalysis{snapRow, snapRow}, true, true, true, "no usable data"},
+		{"partial", rows, true, true, false, "1 of 2"},
+		{"all peak", []model.WorkloadAnalysis{peakRow, peakRow}, true, true, false, "Prometheus peak —"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			label, snap := basisStatus(tt.rows, o, tt.configured, tt.reachable)
+			if snap != tt.wantSnap {
+				t.Errorf("snapshotOnly = %v, want %v (label: %s)", snap, tt.wantSnap, label)
+			}
+			if !strings.Contains(label, tt.wantContains) {
+				t.Errorf("label %q missing %q", label, tt.wantContains)
+			}
+		})
+	}
+}
 
 func TestParseVerdicts(t *testing.T) {
 	got, err := parseVerdicts([]string{"scale-out", "OOM", "no-hpa"})
