@@ -1,0 +1,30 @@
+# Compiled binary (krew convention name) and build output
+/kubectl-truce
+/truce
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test / coverage artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace files (go.mod/go.sum stay tracked)
+go.work
+go.work.sum
+
+# Vendored deps (module mode; vendoring is opt-in)
+/vendor/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+.claude/
+.cc10x/
