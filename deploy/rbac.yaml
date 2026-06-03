@@ -1,0 +1,58 @@
+# truce RBAC — strictly read-only. Every rule is get/list/watch only; there are
+# no create/update/patch/delete verbs anywhere. Apply this, then bind it to the
+# identity that runs `kubectl truce`.
+#
+#   kubectl apply -f deploy/rbac.yaml
+#
+# The ClusterRoleBinding below targets a ServiceAccount named "truce" in the
+# "truce" namespace; edit the subjects to match how you run the tool (a user,
+# group, or a different ServiceAccount).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: truce
+  namespace: truce
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: truce-readonly
+  labels:
+    app.kubernetes.io/name: truce
+rules:
+  # Pods (live requests, owner refs, resize status) and Nodes (nodeInfo).
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  # Workloads and the ReplicaSet hop for the Pod->RS->Deployment owner walk.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  # HorizontalPodAutoscalers (autoscaling/v2).
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list"]
+  # VerticalPodAutoscaler recommendations (read via the dynamic client).
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers"]
+    verbs: ["get", "list"]
+  # Pod and node metrics for the OOM-risk working-set check.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: truce-readonly
+  labels:
+    app.kubernetes.io/name: truce
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: truce-readonly
+subjects:
+  - kind: ServiceAccount
+    name: truce
+    namespace: truce
