@@ -1,5 +1,7 @@
 # truce
 
+[![CI](https://github.com/HeinanCA/truce/actions/workflows/ci.yml/badge.svg)](https://github.com/HeinanCA/truce/actions/workflows/ci.yml)
+
 **A read-only Kubernetes rightsizing advisor that predicts what your HPA will do
 *before* you apply a VPA recommendation — and shows the resulting footprint delta.**
 
