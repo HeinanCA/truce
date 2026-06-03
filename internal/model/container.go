@@ -33,7 +33,23 @@ type ContainerAnalysis struct {
 	HasVPA bool
 
 	// CurrentMemWorkingSet is the current memory working set in bytes from
-	// metrics-server, used to flag OOM risk when VPA memory target is below it.
-	// Nil if metrics were unavailable for the container.
+	// metrics-server (instantaneous), used to flag OOM risk when the VPA memory
+	// target is below it. Nil if metrics were unavailable for the container.
 	CurrentMemWorkingSet *int64
+
+	// PeakMemWorkingSet is an optional max working set in bytes over a window
+	// from a time-series source (Prometheus). When set, the engine prefers it for
+	// the OOM check — memory is non-compressible, so the worst moment is what
+	// matters, not a snapshot. Nil when no time-series source was queried.
+	PeakMemWorkingSet *int64
+}
+
+// OOMWorkingSet returns the working set to compare the VPA memory target
+// against (peak when available, else the snapshot) and whether it came from the
+// peak source.
+func (c ContainerAnalysis) OOMWorkingSet() (bytes *int64, fromPeak bool) {
+	if c.PeakMemWorkingSet != nil {
+		return c.PeakMemWorkingSet, true
+	}
+	return c.CurrentMemWorkingSet, false
 }

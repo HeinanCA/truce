@@ -20,7 +20,7 @@ func renderTable(w io.Writer, rows []model.WorkloadAnalysis, p Palette, wide boo
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 
 	if wide {
-		fmt.Fprintln(tw, "WORKLOAD\tHPA\tNOW\tVPA REC\tPREDICT\tΔ FOOTPRINT\tVERDICT\tFLAGS\tUTIL\tTOL")
+		fmt.Fprintln(tw, "WORKLOAD\tHPA\tNOW\tVPA REC\tPREDICT\tΔ FOOTPRINT\tVERDICT\tFLAGS\tUTIL\tTOL\tBASIS")
 	} else {
 		fmt.Fprintln(tw, "WORKLOAD\tHPA\tNOW\tVPA REC\tPREDICT\tΔ FOOTPRINT\tVERDICT\tFLAGS")
 	}
@@ -37,7 +37,7 @@ func renderTable(w io.Writer, rows []model.WorkloadAnalysis, p Palette, wide boo
 			deltaStr(a.FootprintDelta, p), verdictStr(a.Verdict, p), flagsStr(a.Flags, p))
 
 		if wide {
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", base, utilCol(a), tolCol(a))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", base, utilCol(a), tolCol(a), basisCol(a))
 			writeContainerRows(tw, a)
 		} else {
 			fmt.Fprintln(tw, base)
@@ -61,7 +61,7 @@ func writeContainerRows(tw io.Writer, a model.WorkloadAnalysis) {
 			tc, tm := c.VPA.Target.CPUMilli, c.VPA.Target.MemBytes
 			recC = resourceStr(deref(tc), deref(tm), tc != nil, tm != nil)
 		}
-		fmt.Fprintf(tw, "  └ %s\t\t%s\t%s\t\t\t\t\t\t\n", c.Name, nowC, recC)
+		fmt.Fprintf(tw, "  └ %s\t\t%s\t%s\t\t\t\t\t\t\t\n", c.Name, nowC, recC)
 	}
 }
 
@@ -90,6 +90,14 @@ func utilCol(a model.WorkloadAnalysis) string {
 // tolCol renders the effective up/down tolerance used (wide).
 func tolCol(a model.WorkloadAnalysis) string {
 	return fmt.Sprintf("↑%.0f%% ↓%.0f%%", a.ToleranceUp*100, a.ToleranceDown*100)
+}
+
+// basisCol renders whether the row used a time-series peak or a snapshot (wide).
+func basisCol(a model.WorkloadAnalysis) string {
+	if a.UsageBasis == model.BasisPeak {
+		return "peak"
+	}
+	return "snapshot"
 }
 
 func deref(p *int64) int64 {

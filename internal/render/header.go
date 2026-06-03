@@ -28,6 +28,14 @@ func renderHeader(w io.Writer, r Report, p Palette) {
 	if c.SkippedBarePods > 0 {
 		fmt.Fprintf(w, "Skipped:        %d bare pod(s) with no controller owner\n", c.SkippedBarePods)
 	}
+	if r.UsageBasisLabel != "" {
+		fmt.Fprintf(w, "Usage basis:    %s\n", r.UsageBasisLabel)
+	}
+	if r.SnapshotOnly {
+		fmt.Fprintln(w, p.Yellow("  ⚠ snapshot only — verdicts use the HPA's instantaneous utilization. A SAFE or"))
+		fmt.Fprintln(w, p.Yellow("    mild SCALE verdict measured at low traffic can understate spike-time scale-out"))
+		fmt.Fprintln(w, p.Yellow("    and OOM risk. Pass --prometheus <url> for peak-aware (P95 CPU / max mem) verdicts."))
+	}
 
 	// Capability diagnostics — honest, with install guidance when missing.
 	fmt.Fprintln(w, p.Bold("\nCapabilities:"))

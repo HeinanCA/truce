@@ -55,9 +55,26 @@ type HPAMetric struct {
 
 	// CurrentUtilization is the current average utilization percent reported by
 	// the HPA's own status.currentMetrics. This — not metrics-server, not the
-	// VPA target — is the authoritative usage basis for prediction. Nil if the
-	// HPA has not yet reported a value for this metric.
+	// VPA target — is the authoritative snapshot usage basis for prediction. Nil
+	// if the HPA has not yet reported a value for this metric.
 	CurrentUtilization *int32
+
+	// PeakUtilization is an optional peak utilization percent computed from a
+	// time-series source (Prometheus) over a window — P95 for CPU, max for
+	// memory. When set, the engine prefers it over the instantaneous
+	// CurrentUtilization so SAFE/SCALE verdicts reflect spike-time behavior
+	// rather than a single (possibly trough) snapshot. Nil when no time-series
+	// source was queried.
+	PeakUtilization *int32
+}
+
+// UsageUtil returns the utilization basis to predict from (peak when available,
+// else the HPA snapshot) and whether the value came from the peak source.
+func (m HPAMetric) UsageUtil() (util *int32, fromPeak bool) {
+	if m.PeakUtilization != nil {
+		return m.PeakUtilization, true
+	}
+	return m.CurrentUtilization, false
 }
 
 // IsUtilizationCoupled reports whether this metric's behavior changes when
