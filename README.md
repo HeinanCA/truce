@@ -103,7 +103,33 @@ kubectl truce -A --fail-on scale-out,hits-ceiling,oom-risk
 
 Flags: `-n/--namespace`, `-A/--all-namespaces`, `-o table|wide|json|diff`,
 `--sort delta|name|verdict`, `--only`, `--problems-only`, `--fail-on`,
-`--tolerance`, `--no-color`. Inherits `--context` / `--kubeconfig`.
+`--tolerance`, `--no-color`, `--prometheus`, `--prometheus-window`,
+`--cpu-quantile`. Inherits `--context` / `--kubeconfig`.
+
+## Peak-aware verdicts (recommended)
+
+By default truce predicts from the HPA's **instantaneous** utilization — a single
+snapshot. If you run it at a quiet moment, a downsizing rec can look `SAFE` while a
+later client spike would drive the HPA to scale out hard (or starve/OOM the pod
+before it reacts). truce labels this clearly and warns in the header.
+
+Point it at Prometheus and verdicts are computed from **peak** usage instead:
+
+```sh
+kubectl port-forward -n monitoring svc/prometheus 9090:9090 &
+kubectl truce -A --prometheus http://localhost:9090 --prometheus-window 7d
+```
+
+- **CPU** uses the P95 of per-pod usage over the window (`--cpu-quantile` to tune)
+  → feeds the scale-out prediction.
+- **Memory** uses the **max** working set over the window → feeds the OOM check
+  (memory is non-compressible, so the worst moment is what matters, not a percentile).
+
+truce runs once and finishes in seconds — the history lives in Prometheus, which
+already scrapes your cluster; truce just issues read-only instant queries with the
+window baked into the PromQL. Pods are matched by name pattern per workload kind
+(so historical, since-replaced pods are still counted) using the standard cAdvisor
+metrics `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes`.
 
 **Exit codes:** `0` clean · `1` operational error · `3` `--fail-on` matched.
 
@@ -121,6 +147,11 @@ Honest about what truce does **not** do:
   model of the HPA algorithm. It does not simulate stabilization windows, scaling
   policies, rate limits, or HPA behaviors beyond taking the max across metrics.
   Output is labeled `predicted`, never `confirmed`.
+- **Snapshot mode is blind to traffic peaks.** Without `--prometheus`, verdicts use
+  the HPA's instantaneous utilization, so a verdict measured at low traffic can
+  understate spike-time scale-out and OOM risk. truce warns when in this mode; use
+  the peak-aware mode above for verdicts that survive your traffic. Pod matching in
+  peak mode relies on standard naming conventions.
 - **It needs the HPA's current utilization.** If the HPA hasn't reported
   `status.currentMetrics` for a metric (just created, or basis unreliable), that
   metric is skipped and flagged `UNRELIABLE` rather than guessed.

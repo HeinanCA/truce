@@ -15,6 +15,7 @@ import (
 	"github.com/heinanca/truce/internal/detect"
 	"github.com/heinanca/truce/internal/engine"
 	"github.com/heinanca/truce/internal/model"
+	"github.com/heinanca/truce/internal/promq"
 	"github.com/heinanca/truce/internal/render"
 )
 
@@ -29,6 +30,9 @@ type options struct {
 	failOn        []string
 	tolerance     float64
 	noColor       bool
+	promURL       string
+	promWindow    string
+	cpuQuantile   float64
 }
 
 // gateError signals that --fail-on matched; main maps it to a distinct exit code
@@ -72,6 +76,9 @@ func newRootCommand() *cobra.Command {
 	f.StringSliceVar(&o.failOn, "fail-on", nil, "exit non-zero if any workload has these verdicts (CI gating)")
 	f.Float64Var(&o.tolerance, "tolerance", engine.DefaultTolerance, "fallback HPA tolerance when not set on the HPA")
 	f.BoolVar(&o.noColor, "no-color", false, "disable ANSI color")
+	f.StringVar(&o.promURL, "prometheus", "", "Prometheus base URL for peak-aware verdicts (e.g. http://localhost:9090); without it, verdicts use the instantaneous snapshot")
+	f.StringVar(&o.promWindow, "prometheus-window", "7d", "Prometheus look-back window for peak usage")
+	f.Float64Var(&o.cpuQuantile, "cpu-quantile", 0.95, "quantile for peak CPU utilization (memory always uses the max)")
 
 	return cmd
 }
@@ -109,6 +116,29 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 	diag := collect.Diagnose(raw, result)
 	inplace := detect.InPlace(raw.ServerVersion, raw.ResizeSubresource, raw.Nodes, raw.Pods)
 
+	// Optional peak-aware enrichment from Prometheus. Without it, verdicts rest
+	// on the HPA's instantaneous snapshot (blind to traffic spikes).
+	workloads := result.Workloads
+	basisLabel := "instantaneous snapshot (HPA status / metrics-server)"
+	snapshotOnly := true
+	if o.promURL != "" {
+		pc, err := promq.NewClient(o.promURL)
+		if err != nil {
+			return err
+		}
+		popts := promq.DefaultOptions()
+		popts.Window = o.promWindow
+		popts.CPUQuantile = o.cpuQuantile
+		enriched, warns := promq.Enrich(ctx, pc, workloads, popts)
+		workloads = enriched
+		snapshotOnly = false
+		basisLabel = fmt.Sprintf("Prometheus peak — P%.0f CPU / max memory over %s",
+			o.cpuQuantile*100, o.promWindow)
+		for _, wmsg := range warns {
+			fmt.Fprintln(os.Stderr, "truce: prometheus:", wmsg)
+		}
+	}
+
 	cluster := model.ClusterStatus{
 		ServerVersion:           raw.ServerVersion,
 		InPlaceTier:             inplace.Tier,
@@ -126,8 +156,8 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		Now:              time.Now(),
 	}
 
-	rows := make([]model.WorkloadAnalysis, 0, len(result.Workloads))
-	for _, cw := range result.Workloads {
+	rows := make([]model.WorkloadAnalysis, 0, len(workloads))
+	for _, cw := range workloads {
 		a := engine.Analyze(cw, engOpts)
 		if a.Actionable {
 			if managed, _ := detect.GitOps(cw.Workload.Annotations); managed {
@@ -137,7 +167,13 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		rows = append(rows, a)
 	}
 
-	report := render.Report{Cluster: cluster, Diagnostics: diag, Workloads: rows}
+	report := render.Report{
+		Cluster:         cluster,
+		Diagnostics:     diag,
+		Workloads:       rows,
+		UsageBasisLabel: basisLabel,
+		SnapshotOnly:    snapshotOnly,
+	}
 	ropts := render.Options{
 		Format:       o.output,
 		NoColor:      o.resolveNoColor(out),
