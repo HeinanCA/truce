@@ -13,6 +13,13 @@ type Report struct {
 	Cluster     model.ClusterStatus
 	Diagnostics model.Diagnostics
 	Workloads   []model.WorkloadAnalysis
+
+	// UsageBasisLabel describes the data behind the verdicts (e.g. the Prometheus
+	// peak window, or the snapshot fallback) for the header.
+	UsageBasisLabel string
+	// SnapshotOnly is true when no time-series source was queried, so the header
+	// warns that SAFE/SCALE verdicts may understate traffic spikes.
+	SnapshotOnly bool
 }
 
 // Options controls output format, color, ordering, and filtering.

@@ -94,6 +94,7 @@ func Analyze(cw model.CollectedWorkload, opts Options) model.WorkloadAnalysis {
 		return a
 	}
 	a.Actionable = true
+	a.UsageBasis = usageBasis(cw)
 
 	flags := newFlagSet()
 
@@ -129,22 +130,41 @@ func Analyze(cw model.CollectedWorkload, opts Options) model.WorkloadAnalysis {
 	return a
 }
 
-// oomRisk reports whether any container's VPA memory target is below its current
-// memory working set — applying it would likely OOM-kill the pod.
+// oomRisk reports whether any container's VPA memory target is below its working
+// set — applying it would likely OOM-kill the pod. It uses the peak working set
+// when available (memory is non-compressible, so the worst moment is what
+// matters), else the instantaneous snapshot.
 func oomRisk(containers []model.ContainerAnalysis) bool {
 	for _, c := range containers {
 		if !c.HasVPA {
 			continue
 		}
 		target, ok := c.VPA.Target.Mem()
-		if !ok || c.CurrentMemWorkingSet == nil {
+		ws, _ := c.OOMWorkingSet()
+		if !ok || ws == nil {
 			continue
 		}
-		if target < *c.CurrentMemWorkingSet {
+		if target < *ws {
 			return true
 		}
 	}
 	return false
+}
+
+// usageBasis reports whether any peak time-series input is present; if so the
+// verdict reflects peak behavior, otherwise it is snapshot-only.
+func usageBasis(cw model.CollectedWorkload) model.UsageBasis {
+	for _, m := range cw.HPA.Metrics {
+		if m.PeakUtilization != nil {
+			return model.BasisPeak
+		}
+	}
+	for _, c := range cw.Containers {
+		if c.PeakMemWorkingSet != nil {
+			return model.BasisPeak
+		}
+	}
+	return model.BasisSnapshot
 }
 
 // lowConfidence reports whether the VPA recommendation should be treated as

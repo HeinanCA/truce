@@ -1,5 +1,16 @@
 package model
 
+// UsageBasis names the data source the prediction was computed from.
+type UsageBasis string
+
+const (
+	// BasisSnapshot: instantaneous HPA status / metrics-server only. Blind to
+	// traffic peaks — a SAFE verdict here may understate spike-time scale-out.
+	BasisSnapshot UsageBasis = "snapshot"
+	// BasisPeak: a time-series peak (P95 CPU / max memory over a window).
+	BasisPeak UsageBasis = "peak"
+)
+
 // WorkloadAnalysis is one output row: a workload plus everything truce concluded
 // about it. The engine produces this from the collected inputs; the renderer
 // consumes it. Per-container detail lives in Containers.
@@ -12,6 +23,11 @@ type WorkloadAnalysis struct {
 	// is nothing to advise; the renderer skips such rows. When false, Verdict is
 	// the zero value.
 	Actionable bool
+
+	// UsageBasis records whether the verdict was computed from a time-series peak
+	// or only an instantaneous snapshot — surfaced so a snapshot-only verdict is
+	// never mistaken for one that accounts for traffic spikes.
+	UsageBasis UsageBasis
 
 	Verdict Verdict
 	Flags   []Flag

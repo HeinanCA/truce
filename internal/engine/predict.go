@@ -104,7 +104,8 @@ type metricResult struct {
 // unchanged current request otherwise. Returns ok=false when the basis is
 // incomplete (raising UNRELIABLE).
 func predictMetric(m *model.HPAMetric, containers []model.ContainerAnalysis, n, minR, maxR int32, tolUp, tolDown float64, flags *flagSet) (metricResult, bool) {
-	if m.CurrentUtilization == nil || m.TargetUtilization == nil || *m.TargetUtilization <= 0 {
+	util, _ := m.UsageUtil() // peak when present, else snapshot
+	if util == nil || m.TargetUtilization == nil || *m.TargetUtilization <= 0 {
 		return metricResult{}, false
 	}
 
@@ -133,7 +134,7 @@ func predictMetric(m *model.HPAMetric, containers []model.ContainerAnalysis, n, 
 		return metricResult{}, false
 	}
 
-	predUtil := float64(*m.CurrentUtilization) * float64(rOld) / float64(rNew)
+	predUtil := float64(*util) * float64(rOld) / float64(rNew)
 	ratio := predUtil / float64(*m.TargetUtilization)
 
 	mr := metricResult{predictedUtil: int32(math.Round(predUtil))}
