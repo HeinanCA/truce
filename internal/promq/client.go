@@ -49,11 +49,25 @@ func NewClient(address string) (*Client, error) {
 	return &Client{api: promv1.NewAPI(c)}, nil
 }
 
+// Ping does one cheap query to confirm Prometheus is reachable, so the caller
+// can skip enrichment (and avoid dozens of slow timeouts) and label the run
+// honestly when it is not.
+func (c *Client) Ping(ctx context.Context) error {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, _, err := c.api.Query(cctx, "vector(1)", time.Now()); err != nil {
+		return fmt.Errorf("prometheus unreachable: %w", err)
+	}
+	return nil
+}
+
 // queryScalar runs an instant query expected to yield a single scalar value
 // (one-element vector). It returns ok=false when the result is empty (no data
 // for the series), which the caller treats as "leave the snapshot in place".
 func (c *Client) queryScalar(ctx context.Context, q string) (float64, bool, error) {
-	val, _, err := c.api.Query(ctx, q, time.Now())
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	val, _, err := c.api.Query(cctx, q, time.Now())
 	if err != nil {
 		return 0, false, fmt.Errorf("prometheus query %q: %w", q, err)
 	}
