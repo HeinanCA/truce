@@ -154,7 +154,7 @@ Point it at Prometheus and verdicts are computed from **peak** usage instead:
 
 ```sh
 kubectl port-forward -n monitoring svc/prometheus 9090:9090 &
-kubectl truce -A --prometheus http://localhost:9090 --prometheus-window 7d
+kubectl truce -A --prometheus http://localhost:9090 --window 7d
 ```
 
 - **CPU** uses the P95 of per-pod usage over the window (`--cpu-quantile` to tune)
@@ -169,6 +169,40 @@ window baked into the PromQL. Pods are matched by name pattern per workload kind
 metrics `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes`.
 
 **Exit codes:** `0` clean · `1` operational error · `3` `--fail-on` matched.
+
+## Cost estimate (built-in pricing)
+
+truce translates the freed CPU/memory into a dollar figure. Pricing is built in
+and provider-pluggable — **no manual price entry on AWS**:
+
+- **AWS nodes + resolvable AWS credentials → the AWS backend (default).** Each
+  node is priced by its `karpenter.sh/capacity-type`: on-demand from the EC2
+  **Price List API** (`pricing:GetProducts`, keyed on instance type + region),
+  spot from **`ec2:DescribeSpotPriceHistory`** (latest price for the type + AZ).
+  Lookups are cached on disk (`--pricing-cache-ttl`, default 24h).
+- **Otherwise → static.** `--pricing-file` (an `instanceType: USD/hr` map) or a
+  flat `--node-cost`.
+- **No price at all → PRICE-MISSING.** truce still reports node/resource savings;
+  only the dollar figure drops out. `--no-pricing` forces this path.
+
+The cluster bottom line is headlined *"up to $X/month (estimated, assumes
+consolidation; spot priced at current)"*. Spot is variable and per-AZ, so
+spot-derived numbers are dated; the blended `$/node-hr` notes how many nodes are
+spot vs on-demand. A type that fails to price is flagged, not fatal.
+
+**AWS IAM (read-only, granted via IRSA or the node instance role — NOT Kubernetes
+RBAC):**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["pricing:GetProducts", "ec2:DescribeSpotPriceHistory"],
+    "Resource": "*"
+  }]
+}
+```
 
 ## Read-only guarantee
 

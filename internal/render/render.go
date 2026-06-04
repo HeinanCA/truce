@@ -21,6 +21,10 @@ type Report struct {
 	// SnapshotOnly is true when no time-series source was queried, so the header
 	// warns that SAFE/SCALE verdicts may understate traffic spikes.
 	SnapshotOnly bool
+
+	// Cost is the estimated dollar impact of the recommendations. Cost.Enabled is
+	// false when no node price could be resolved (PRICE-MISSING).
+	Cost model.CostReport
 }
 
 // Options controls output format, color, ordering, and filtering.
@@ -49,16 +53,32 @@ func Render(w io.Writer, r Report, opts Options) error {
 		return renderDiff(w, rows, opts.Rec, p)
 	case "advice":
 		renderHeader(w, r, p)
-		return renderAdvice(w, r, rows, p)
+		if err := renderAdvice(w, r, rows, p); err != nil {
+			return err
+		}
+		renderCost(w, r.Cost, p)
+		return nil
 	case "recommend":
 		renderHeader(w, r, p)
-		return renderRecommendTable(w, r, rows, opts.Rec, p)
+		if err := renderRecommendTable(w, r, rows, opts.Rec, p); err != nil {
+			return err
+		}
+		renderCost(w, r.Cost, p)
+		return nil
 	case "wide":
 		renderHeader(w, r, p)
-		return renderTable(w, rows, p, true)
+		if err := renderTable(w, rows, p, true); err != nil {
+			return err
+		}
+		renderCost(w, r.Cost, p)
+		return nil
 	case "table", "":
 		renderHeader(w, r, p)
-		return renderTable(w, rows, p, false)
+		if err := renderTable(w, rows, p, false); err != nil {
+			return err
+		}
+		renderCost(w, r.Cost, p)
+		return nil
 	default:
 		return fmt.Errorf("unknown output format %q (want advice|recommend|table|wide|json|diff)", opts.Format)
 	}

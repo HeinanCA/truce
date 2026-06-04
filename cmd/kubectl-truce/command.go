@@ -12,6 +12,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	"github.com/heinanca/truce/internal/collect"
+	"github.com/heinanca/truce/internal/cost"
 	"github.com/heinanca/truce/internal/detect"
 	"github.com/heinanca/truce/internal/engine"
 	"github.com/heinanca/truce/internal/model"
@@ -41,6 +42,11 @@ type options struct {
 	setCPULimit   bool
 	service       string
 	valuesPath    string
+
+	pricingFile string
+	nodeCost    float64
+	noPricing   bool
+	cacheTTLHrs float64
 }
 
 // gateError signals that --fail-on matched; main maps it to a distinct exit code
@@ -91,6 +97,10 @@ func newRootCommand() *cobra.Command {
 	f.Float64Var(&o.memHeadroom, "mem-headroom", 1.25, "multiplier over mem_max for the memory request")
 	f.StringVar(&o.baseline, "baseline", "p95", "re-prediction baseline: p95 or p50")
 	f.BoolVar(&o.setCPULimit, "set-cpu-limit", false, "also recommend a CPU limit = ceil(cpu_max × 1.5) (default: leave unset for burst)")
+	f.StringVar(&o.pricingFile, "pricing-file", "", "static instanceType→USD/hr map (YAML/JSON) for non-AWS clusters; AWS pricing is built in and auto-selected")
+	f.Float64Var(&o.nodeCost, "node-cost", 0, "flat USD/node-hr static fallback when no per-type or AWS price is available")
+	f.BoolVar(&o.noPricing, "no-pricing", false, "skip the AWS pricing backend (use static/PRICE-MISSING only)")
+	f.Float64Var(&o.cacheTTLHrs, "pricing-cache-ttl", 24, "hours to cache AWS price lookups on disk")
 	f.StringVar(&o.service, "service", "", "recommend HPA-aware, OOM-safe request values for a single workload by name")
 	f.StringVar(&o.valuesPath, "values", "", "path to that service's values file; shows current→recommended as a diff (read-only)")
 
@@ -198,12 +208,17 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 	// verdict computed on a snapshot must never be dressed up as peak-aware.
 	basisLabel, snapshotOnly := basisStatus(rows, o, promConfigured, promReachable)
 
+	// Estimate the dollar impact of the recommendations. Pricing is built in and
+	// provider-pluggable; this never fails the run (PRICE-MISSING on no price).
+	costReport := buildCostReport(ctx, o, collect.NodeInfos(raw.Nodes), rows)
+
 	report := render.Report{
 		Cluster:         cluster,
 		Diagnostics:     diag,
 		Workloads:       rows,
 		UsageBasisLabel: basisLabel,
 		SnapshotOnly:    snapshotOnly,
+		Cost:            costReport,
 	}
 	ropts := render.Options{
 		Format:       o.output,
@@ -282,6 +297,48 @@ func basisStatus(rows []model.WorkloadAnalysis, o *options, configured, reachabl
 	default:
 		return fmt.Sprintf("Prometheus peak — P%.0f CPU / max memory over %s", o.cpuQuantile*100, o.window), false
 	}
+}
+
+// buildCostReport prices the cluster's nodes and translates the recommendations'
+// freed resources into a dollar estimate. It is read-only: node metadata comes
+// from the already-collected nodes, and only read-only AWS APIs are called.
+func buildCostReport(ctx context.Context, o *options, infos []model.NodeInfo, rows []model.WorkloadAnalysis) model.CostReport {
+	now := time.Now()
+	cfg := cost.Config{
+		PricingFile: o.pricingFile,
+		NodeCost:    o.nodeCost,
+		CacheDir:    pricingCacheDir(),
+		CacheTTL:    time.Duration(o.cacheTTLHrs * float64(time.Hour)),
+		DisableAWS:  o.noPricing,
+		Now:         now,
+	}
+	provider := cost.SelectProvider(ctx, infos, cfg)
+	priced := cost.PriceNodes(ctx, provider, infos)
+
+	var freedCPU, freedMem int64
+	for _, a := range rows {
+		if !a.Actionable {
+			continue
+		}
+		d := recommend.ForWith(a, o.recConfig()).FootprintDelta
+		if d.CPUMilli < 0 {
+			freedCPU += -d.CPUMilli
+		}
+		if d.MemBytes < 0 {
+			freedMem += -d.MemBytes
+		}
+	}
+	return cost.Estimate(priced, provider.Backend(), freedCPU, freedMem, now)
+}
+
+// pricingCacheDir returns the on-disk cache directory for AWS price lookups,
+// under the user cache dir; "" disables caching if it cannot be resolved.
+func pricingCacheDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return base + "/truce/pricing"
 }
 
 // recConfig builds the recommendation sizing config from the flags.
