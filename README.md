@@ -106,6 +106,43 @@ Flags: `-n/--namespace`, `-A/--all-namespaces`, `-o table|wide|json|diff`,
 `--tolerance`, `--no-color`, `--prometheus`, `--prometheus-window`,
 `--cpu-quantile`. Inherits `--context` / `--kubeconfig`.
 
+## Recommended values for one service (the payoff)
+
+The table tells you *what will happen*; `--service` tells you *what to set* — a
+single request value that is better than what VPA or HPA produce alone:
+
+```sh
+kubectl truce -n neteera --prometheus http://localhost:9090 \
+  --service ml-management --values ./charts/ml-management/values.fda
+```
+
+```
+RECOMMENDED VALUES — ml-management  (PROVISIONAL — VPA history < 48h)
+  VPA target alone → HPA pegs the ceiling (1→10 replicas, -650m cpu). truce keeps it stable.
+
+  ml-management
+    cpu:    1 → 360m   (holds the HPA at 50% under peak load (no scale-out))
+    memory: 2Gi → 1.7Gi   (floored at observed peak working set +15% (OOM-safe))
+
+  ⚠ This workload hits its HPA ceiling — raise maxReplicas to ≥ 15.
+
+📄 ./charts/ml-management/values.fda
+  at ml-management:
+    cpu:    1 → 360m
+    memory: 2Gi → 1.7Gi
+```
+
+- **CPU** is sized to hold the HPA at its target *under peak load* — recovering
+  the over-provisioning without triggering a scale-out (VPA's `35m` here would
+  drive the HPA to 10 replicas).
+- **Memory** is floored at the observed peak (plus margin) — never below real
+  usage, so a downsize can't cause an OOM.
+- It flags when **maxReplicas** is the real bottleneck — advice neither VPA nor
+  HPA gives.
+- `--values <file>` reads your env's values file (read-only) and shows the
+  current committed requests next to the recommendation, PR-ready. truce never
+  writes the file.
+
 ## Peak-aware verdicts (recommended)
 
 By default truce predicts from the HPA's **instantaneous** utilization — a single
