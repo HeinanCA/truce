@@ -11,20 +11,24 @@ import (
 	"github.com/heinanca/truce/internal/valuesfile"
 )
 
-// RenderRecommendation prints the per-service recommended values: the contrast
-// against the raw VPA target, the current→recommended change per container with
-// the reasoning, any maxReplicas guidance, and a paste-ready requests snippet.
+// RenderRecommendation prints the per-service recommendation: truce's own
+// peak-based request values (not the VPA target), the measured spread behind
+// them, the HPA re-prediction with the new request, the footprint delta, the VPA
+// cross-check, and a paste-ready snippet.
 func RenderRecommendation(w io.Writer, rec recommend.Recommendation, p Palette) {
-	title := fmt.Sprintf("RECOMMENDED VALUES — %s", rec.Service)
-	if rec.Provisional {
-		title += "  (PROVISIONAL — VPA history < 48h)"
-	}
-	fmt.Fprintln(w, p.Bold(title))
-
+	fmt.Fprintln(w, p.Bold(fmt.Sprintf("RECOMMENDED VALUES — %s", rec.Service)))
 	if rec.Contrast != "" {
 		fmt.Fprintln(w, "  "+p.Dim(rec.Contrast))
 	}
-	fmt.Fprintln(w)
+
+	// HPA re-prediction with the new request — the differentiator.
+	pred := fmt.Sprintf("%d → %d replicas", rec.CurrentReplicas, rec.PredictedReplicas)
+	if rec.HPAStillScales {
+		fmt.Fprintln(w, p.Red("  HPA re-prediction (new request): "+pred+"  ⚠ STILL SCALES OUT"))
+	} else {
+		fmt.Fprintln(w, p.Green("  HPA re-prediction (new request): "+pred+"  (no scale-out)"))
+	}
+	fmt.Fprintf(w, "  Footprint Δ: %s\n\n", deltaStr(rec.FootprintDelta, p))
 
 	for _, c := range rec.Containers {
 		fmt.Fprintf(w, "  %s\n", p.Bold(c.Name))
@@ -32,15 +36,27 @@ func RenderRecommendation(w io.Writer, rec recommend.Recommendation, p Palette) 
 			fmt.Fprintf(w, "    cpu:    %s → %s   (%s)\n",
 				cpuOrDash(c.CPUNow), recColor(cpuStr(*c.CPURec), c.CPUWhy, p), c.CPUWhy)
 		}
+		if c.CPULimit != nil {
+			fmt.Fprintf(w, "    cpu limit: %s\n", cpuStr(*c.CPULimit))
+		}
 		if c.MemRec != nil {
 			fmt.Fprintf(w, "    memory: %s → %s   (%s)\n",
 				memOrDash(c.MemNow), recColor(memStr(*c.MemRec), c.MemWhy, p), c.MemWhy)
 		}
+		if c.MemLimit != nil {
+			fmt.Fprintf(w, "    memory limit: %s\n", memStr(*c.MemLimit))
+		}
+		fmt.Fprintf(w, "    %s\n", p.Dim(spreadLine(c)))
+		if c.VPACPU != nil || c.VPAMem != nil {
+			fmt.Fprintf(w, "    %s\n", p.Dim("VPA cross-check: "+vpaLine(c)))
+		}
+		if len(c.Flags) > 0 {
+			fmt.Fprintf(w, "    flags: %s\n", flagsStr(c.Flags, p))
+		}
 	}
 
 	if rec.RaiseMaxTo > 0 {
-		fmt.Fprintln(w, p.Yellow(fmt.Sprintf("\n  ⚠ This workload hits its HPA ceiling — raise maxReplicas to ≥ %d, "+
-			"a fix neither VPA nor HPA will suggest.", rec.RaiseMaxTo)))
+		fmt.Fprintln(w, p.Yellow(fmt.Sprintf("\n  ⚠ Even peak-sized, the HPA pins at its ceiling — raise maxReplicas to ≥ %d.", rec.RaiseMaxTo)))
 	}
 
 	// Paste-ready snippet.
@@ -53,36 +69,48 @@ func RenderRecommendation(w io.Writer, rec recommend.Recommendation, p Palette) 
 		if c.MemRec != nil {
 			fmt.Fprintf(w, "        memory: \"%s\"\n", memStr(*c.MemRec))
 		}
+		if c.CPULimit != nil || c.MemLimit != nil {
+			fmt.Fprintln(w, "      limits:")
+			if c.CPULimit != nil {
+				fmt.Fprintf(w, "        cpu: \"%dm\"\n", *c.CPULimit)
+			}
+			if c.MemLimit != nil {
+				fmt.Fprintf(w, "        memory: \"%s\"\n", memStr(*c.MemLimit))
+			}
+		}
 	}
 }
 
-// renderRecommendTable prints the safe recommended request for every actionable
-// workload in one shot — the paste-ready list. Every value is floored at the
-// observed peak, so nothing here can starve or OOM the workload.
-func renderRecommendTable(w io.Writer, r Report, rows []model.WorkloadAnalysis, p Palette) error {
+// renderRecommendTable prints truce's peak-based request for every actionable
+// workload in one shot — the paste-ready list. Values are sized to the measured
+// peak (HPA-coupled) or p95 (Burstable), never below the observed peak.
+func renderRecommendTable(w io.Writer, r Report, rows []model.WorkloadAnalysis, cfg recommend.Config, p Palette) error {
 	if len(rows) == 0 {
 		fmt.Fprintln(w, p.Dim("No actionable workloads (need a VPA recommendation)."))
 		return nil
 	}
 	if r.SnapshotOnly {
-		fmt.Fprintln(w, p.Yellow("⚠ snapshot basis — values shown HOLD at current (no cut without peak data). Pass --prometheus for real recommendations.\n"))
+		fmt.Fprintln(w, p.Yellow("⚠ snapshot basis — no usage spread available, values HOLD at current. Pass --prometheus for real recommendations.\n"))
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORKLOAD\tCONTAINER\tCPU\tMEMORY\tWHY")
+	fmt.Fprintln(tw, "WORKLOAD\tCONTAINER\tCPU\tMEMORY\tCPU p95/max\tSPIKE\tREPLICAS\tVPA cpu\tFLAGS")
 	for _, a := range rows {
-		rec := recommend.For(a)
+		rec := recommend.ForWith(a, cfg)
+		repl := fmt.Sprintf("%d→%d", rec.CurrentReplicas, rec.PredictedReplicas)
 		for _, c := range rec.Containers {
 			cpu := changeCell(c.CPUNow, c.CPURec, cpuStr, c.CPUWhy, p)
 			mem := changeCell(c.MemNow, c.MemRec, memStr, c.MemWhy, p)
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-				a.Workload.Name, c.Name, cpu, mem, shortWhy(c.CPUWhy, c.MemWhy))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				a.Workload.Name, c.Name, cpu, mem,
+				p95MaxCell(c), spikeCell(c), repl, cpuPtr(c.VPACPU), flagsStr(c.Flags, p))
 		}
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	fmt.Fprintln(w, p.Dim("\nEvery value is floored at the observed 7-day peak +15% — safe to apply. HOLD = no change (insufficient data)."))
+	fmt.Fprintln(w, p.Dim("\nCPU sized to cpu_max (HPA-coupled) or cpu_p95 (Burstable) + headroom; memory to mem_max + headroom. "+
+		"REPLICAS = HPA re-predicted with the new request. HOLD = no change (no usage data)."))
 	return nil
 }
 
@@ -102,24 +130,54 @@ func changeCell(now, rec *int64, fmtFn func(int64) string, why string, p Palette
 	return nowStr + "→" + p.Green(recStr)
 }
 
-// shortWhy picks the most informative one-liner for the row.
-func shortWhy(cpuWhy, memWhy string) string {
-	if strings.HasPrefix(cpuWhy, "holds the HPA") {
-		return "↑ sized to hold HPA at target (stops scale-out)"
+// p95MaxCell renders "p95/max" for CPU, "—" when unknown.
+func p95MaxCell(c recommend.ContainerRec) string {
+	if c.CPUP95 == nil && c.CPUMax == nil {
+		return "—"
 	}
-	if strings.HasPrefix(cpuWhy, "HOLD") || strings.HasPrefix(memWhy, "HOLD") {
-		return "HOLD — no peak data"
+	return cpuPtr(c.CPUP95) + "/" + cpuPtr(c.CPUMax)
+}
+
+// spikeCell renders the spikiness ratio, "—" when unknown.
+func spikeCell(c recommend.ContainerRec) string {
+	if c.Spikiness <= 0 {
+		return "—"
 	}
-	if strings.Contains(cpuWhy, "KEDA") {
-		return "KEDA external — request safe"
+	return fmt.Sprintf("%.1f×", c.Spikiness)
+}
+
+// spreadLine renders the measured CPU/memory spread for the single-service view.
+func spreadLine(c recommend.ContainerRec) string {
+	cpu := fmt.Sprintf("cpu p50/p95/max %s/%s/%s", cpuPtr(c.CPUP50), cpuPtr(c.CPUP95), cpuPtr(c.CPUMax))
+	mem := "mem max " + memPtr(c.MemMax)
+	spike := ""
+	if c.Spikiness > 0 {
+		spike = fmt.Sprintf(", spikiness %.1f×", c.Spikiness)
 	}
-	return "floored at observed peak"
+	return cpu + ", " + mem + spike
+}
+
+// vpaLine renders the VPA target for cross-check.
+func vpaLine(c recommend.ContainerRec) string {
+	return "cpu " + cpuPtr(c.VPACPU) + " / mem " + memPtr(c.VPAMem)
+}
+
+func cpuPtr(p *int64) string {
+	if p == nil {
+		return "—"
+	}
+	return cpuStr(*p)
+}
+
+func memPtr(p *int64) string {
+	if p == nil {
+		return "—"
+	}
+	return memStr(*p)
 }
 
 // RenderValuesDiff shows the service's committed values in the file next to the
-// recommendation, as a PR-ready before/after. It pairs the file's
-// resources.requests block(s) with the recommendation; a per-service file with
-// one block and one container pairs directly.
+// recommendation, as a PR-ready before/after.
 func RenderValuesDiff(w io.Writer, path string, blocks []valuesfile.Block, rec recommend.Recommendation, p Palette) {
 	fmt.Fprintln(w, p.Bold(fmt.Sprintf("\n📄 %s", path)))
 
@@ -146,7 +204,6 @@ func RenderValuesDiff(w io.Writer, path string, blocks []valuesfile.Block, rec r
 	}
 	fmt.Fprintf(w, "  at %s:\n", loc)
 
-	// Pair with the first container's recommendation (per-service file case).
 	if len(rec.Containers) == 0 {
 		return
 	}
@@ -166,7 +223,7 @@ func dash(s string) string {
 	return s
 }
 
-// recColor greens an applied value, but yellows a HOLD (no change made).
+// recColor greens an applied value, yellows a HOLD (no change made).
 func recColor(val, why string, p Palette) string {
 	if strings.HasPrefix(why, "HOLD") {
 		return p.Yellow(val)

@@ -33,8 +33,12 @@ type options struct {
 	tolerance     float64
 	noColor       bool
 	promURL       string
-	promWindow    string
+	window        string
 	cpuQuantile   float64
+	cpuHeadroom   float64
+	memHeadroom   float64
+	baseline      string
+	setCPULimit   bool
 	service       string
 	valuesPath    string
 }
@@ -81,8 +85,12 @@ func newRootCommand() *cobra.Command {
 	f.Float64Var(&o.tolerance, "tolerance", engine.DefaultTolerance, "fallback HPA tolerance when not set on the HPA")
 	f.BoolVar(&o.noColor, "no-color", false, "disable ANSI color")
 	f.StringVar(&o.promURL, "prometheus", "", "Prometheus base URL for peak-aware verdicts (e.g. http://localhost:9090); without it, verdicts use the instantaneous snapshot")
-	f.StringVar(&o.promWindow, "prometheus-window", "7d", "Prometheus look-back window for peak usage")
-	f.Float64Var(&o.cpuQuantile, "cpu-quantile", 0.95, "quantile for peak CPU utilization (memory always uses the max)")
+	f.StringVar(&o.window, "window", "7d", "Prometheus look-back window for the usage spread (cpu p50/p95/max, mem p95/max)")
+	f.Float64Var(&o.cpuQuantile, "cpu-quantile", 0.95, "quantile treated as cpu_p95 (memory p95 uses the same quantile; max always uses the max)")
+	f.Float64Var(&o.cpuHeadroom, "cpu-headroom", 1.2, "multiplier over the CPU basis (cpu_max HPA-coupled, else cpu_p95) for the request")
+	f.Float64Var(&o.memHeadroom, "mem-headroom", 1.25, "multiplier over mem_max for the memory request")
+	f.StringVar(&o.baseline, "baseline", "p95", "re-prediction baseline: p95 or p50")
+	f.BoolVar(&o.setCPULimit, "set-cpu-limit", false, "also recommend a CPU limit = ceil(cpu_max × 1.5) (default: leave unset for burst)")
 	f.StringVar(&o.service, "service", "", "recommend HPA-aware, OOM-safe request values for a single workload by name")
 	f.StringVar(&o.valuesPath, "values", "", "path to that service's values file; shows current→recommended as a diff (read-only)")
 
@@ -99,6 +107,9 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 	failOn, err := parseVerdicts(o.failOn)
 	if err != nil {
 		return err
+	}
+	if o.baseline != "p95" && o.baseline != "p50" {
+		return fmt.Errorf("invalid --baseline %q (want p95 or p50)", o.baseline)
 	}
 
 	clients, err := collect.NewClients(o.configFlags)
@@ -139,7 +150,7 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		} else {
 			promReachable = true
 			popts := promq.DefaultOptions()
-			popts.Window = o.promWindow
+			popts.Window = o.window
 			popts.CPUQuantile = o.cpuQuantile
 			enriched, warns := promq.Enrich(ctx, pc, workloads, popts)
 			workloads = enriched
@@ -200,6 +211,7 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		Sort:         render.SortMode(o.sortMode),
 		Only:         only,
 		ProblemsOnly: o.problemsOnly,
+		Rec:          o.recConfig(),
 	}
 	if err := render.Render(out, report, ropts); err != nil {
 		return err
@@ -225,7 +237,7 @@ func recommendService(out io.Writer, o *options, rows []model.WorkloadAnalysis) 
 		return fmt.Errorf("service %q has no VPA recommendation, so there is nothing to recommend", o.service)
 	}
 
-	rec := recommend.For(*found)
+	rec := recommend.ForWith(*found, o.recConfig())
 	p := render.NewPalette(o.resolveNoColor(out))
 	if found.UsageBasis != model.BasisPeak {
 		fmt.Fprintln(out, p.Yellow("⚠ snapshot basis — pass --prometheus <url> for peak-aware values; these can miss traffic spikes.\n"))
@@ -266,9 +278,21 @@ func basisStatus(rows []model.WorkloadAnalysis, o *options, configured, reachabl
 		return fmt.Sprintf("snapshot — Prometheus reachable at %s but returned no usable data (check metric names / pod-name match); verdicts fell back to the snapshot", o.promURL), true
 	case peak < actionable:
 		return fmt.Sprintf("Prometheus peak (P%.0f CPU / max memory over %s) for %d of %d workloads; the rest fell back to snapshot — see stderr warnings",
-			o.cpuQuantile*100, o.promWindow, peak, actionable), false
+			o.cpuQuantile*100, o.window, peak, actionable), false
 	default:
-		return fmt.Sprintf("Prometheus peak — P%.0f CPU / max memory over %s", o.cpuQuantile*100, o.promWindow), false
+		return fmt.Sprintf("Prometheus peak — P%.0f CPU / max memory over %s", o.cpuQuantile*100, o.window), false
+	}
+}
+
+// recConfig builds the recommendation sizing config from the flags.
+func (o *options) recConfig() recommend.Config {
+	return recommend.Config{
+		Window:      o.window,
+		CPUHeadroom: o.cpuHeadroom,
+		MemHeadroom: o.memHeadroom,
+		Baseline:    o.baseline,
+		SetCPULimit: o.setCPULimit,
+		Tolerance:   o.tolerance,
 	}
 }
 

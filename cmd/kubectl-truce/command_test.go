@@ -8,7 +8,7 @@ import (
 )
 
 func TestBasisStatus(t *testing.T) {
-	o := &options{promURL: "http://localhost:9090", promWindow: "7d", cpuQuantile: 0.95}
+	o := &options{promURL: "http://localhost:9090", window: "7d", cpuQuantile: 0.95}
 	peakRow := model.WorkloadAnalysis{Actionable: true, UsageBasis: model.BasisPeak}
 	snapRow := model.WorkloadAnalysis{Actionable: true, UsageBasis: model.BasisSnapshot}
 	rows := []model.WorkloadAnalysis{peakRow, snapRow}

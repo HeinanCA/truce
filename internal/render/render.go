@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/heinanca/truce/internal/model"
+	"github.com/heinanca/truce/internal/recommend"
 )
 
 // Report is everything the renderer needs: the cluster header context and the
@@ -29,6 +30,9 @@ type Options struct {
 	Sort         SortMode
 	Only         []model.Verdict
 	ProblemsOnly bool
+
+	// Rec carries the sizing config for the recommend table.
+	Rec recommend.Config
 }
 
 // Render writes the report to w in the requested format. Filtering and sorting
@@ -42,13 +46,13 @@ func Render(w io.Writer, r Report, opts Options) error {
 		return renderJSON(w, r, rows)
 	case "diff":
 		renderHeader(w, r, p)
-		return renderDiff(w, rows, p)
+		return renderDiff(w, rows, opts.Rec, p)
 	case "advice":
 		renderHeader(w, r, p)
 		return renderAdvice(w, r, rows, p)
 	case "recommend":
 		renderHeader(w, r, p)
-		return renderRecommendTable(w, r, rows, p)
+		return renderRecommendTable(w, r, rows, opts.Rec, p)
 	case "wide":
 		renderHeader(w, r, p)
 		return renderTable(w, rows, p, true)

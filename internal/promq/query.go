@@ -20,9 +20,34 @@ func containerFilter(m *model.HPAMetric) string {
 // usage in cores over the window. Averaging per pod makes the value independent
 // of the replica count, matching how the HPA normalizes utilization per pod.
 func cpuPeakUsageQuery(o Options, ns, podRx, cFilter string) string {
+	return cpuQuantileQuery(o, ns, podRx, cFilter, o.CPUQuantile)
+}
+
+// cpuQuantileQuery builds PromQL for a given quantile of the per-pod average CPU
+// usage (cores) over the window — used for cpu_p50 and cpu_p95.
+func cpuQuantileQuery(o Options, ns, podRx, cFilter string, q float64) string {
 	return fmt.Sprintf(
 		`quantile_over_time(%g, avg(sum by (pod) (rate(%s{namespace="%s",pod=~"%s"%s}[5m])))[%s:5m])`,
-		o.CPUQuantile, o.CPUMetric, ns, podRx, cFilter, o.Window,
+		q, o.CPUMetric, ns, podRx, cFilter, o.Window,
+	)
+}
+
+// cpuMaxQuery builds PromQL for the single worst per-pod average CPU usage
+// (cores) over the window — cpu_max, the value an HPA-coupled request is sized
+// to so the autoscaler stays calm at baseline.
+func cpuMaxQuery(o Options, ns, podRx, cFilter string) string {
+	return fmt.Sprintf(
+		`max_over_time(avg(sum by (pod) (rate(%s{namespace="%s",pod=~"%s"%s}[5m])))[%s:5m])`,
+		o.CPUMetric, ns, podRx, cFilter, o.Window,
+	)
+}
+
+// memQuantileQuery builds PromQL for a given quantile of the per-pod average
+// memory working set (bytes) over the window — used for mem_p95.
+func memQuantileQuery(o Options, ns, podRx, container string, q float64) string {
+	return fmt.Sprintf(
+		`quantile_over_time(%g, avg(%s{namespace="%s",pod=~"%s",container="%s"})[%s:1m])`,
+		q, o.MemMetric, ns, podRx, container, o.Window,
 	)
 }
 
