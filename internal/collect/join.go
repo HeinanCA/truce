@@ -116,6 +116,22 @@ func Join(raw *RawCluster) CollectResult {
 		}
 	}
 
+	// 5b. Mark KEDA-managed workloads. KEDA generates the HPA matched above; this
+	// adds the trigger context. When KEDA has scaled to zero there is no live
+	// HPA, so we synthesize Present=true with no metrics → DECOUPLED, not NO HPA.
+	for i := range raw.ScaledObjects {
+		so, ok := parseScaledObject(raw.ScaledObjects[i])
+		if !ok {
+			continue
+		}
+		k := key(model.WorkloadKind(so.TargetKind), so.Namespace, so.TargetName)
+		if acc := accs[k]; acc != nil {
+			acc.hpa.Present = true
+			acc.hpa.ManagedByKEDA = true
+			acc.hpa.KEDATriggers = so.Triggers
+		}
+	}
+
 	// 6. Index pod metrics by namespace/name for working-set lookup.
 	pmIndex := map[string]metricsv1beta1.PodMetrics{}
 	for i := range raw.PodMetrics {

@@ -205,6 +205,12 @@ Honest about what truce does **not** do:
   DaemonSets. Bare pods are skipped (and counted). Matching is via ownerReferences,
   never label selectors, so unusual ownership chains may not resolve.
 - **DaemonSets have no HPA**, so they only ever produce `NO HPA` rightsizing.
+- **KEDA is recognized but not predicted.** truce detects KEDA-managed workloads
+  (via the generated HPA / `ScaledObject`), labels them `KEDA:<trigger>`, and
+  notes that request changes are safe because scaling is external. It cannot
+  predict KEDA's replica count (driven by the external trigger it doesn't read)
+  or its scale-to-zero behavior (invisible to the HPA). A KEDA `cpu`/`memory`
+  trigger, however, surfaces as a `Resource` metric and is predicted normally.
 - **Live requests are read from a representative running pod.** If pods within one
   workload have divergent requests, the representative may not capture every case.
 

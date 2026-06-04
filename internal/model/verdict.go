@@ -37,6 +37,9 @@ const (
 	// FlagRestart: in-place resize is unavailable, so applying the rec restarts
 	// the pod.
 	FlagRestart Flag = "RESTART"
+	// FlagKEDA: the workload is autoscaled by KEDA on an external trigger, so its
+	// replica count is decoupled from CPU/memory requests.
+	FlagKEDA Flag = "KEDA"
 )
 
 // IsProblem reports whether a verdict should sort ahead of benign rows in the
