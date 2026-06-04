@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/heinanca/truce/internal/recommend"
 	"github.com/heinanca/truce/internal/valuesfile"
@@ -27,11 +28,11 @@ func RenderRecommendation(w io.Writer, rec recommend.Recommendation, p Palette) 
 		fmt.Fprintf(w, "  %s\n", p.Bold(c.Name))
 		if c.CPURec != nil {
 			fmt.Fprintf(w, "    cpu:    %s → %s   (%s)\n",
-				cpuOrDash(c.CPUNow), p.Green(cpuStr(*c.CPURec)), c.CPUWhy)
+				cpuOrDash(c.CPUNow), recColor(cpuStr(*c.CPURec), c.CPUWhy, p), c.CPUWhy)
 		}
 		if c.MemRec != nil {
 			fmt.Fprintf(w, "    memory: %s → %s   (%s)\n",
-				memOrDash(c.MemNow), p.Green(memStr(*c.MemRec)), c.MemWhy)
+				memOrDash(c.MemNow), recColor(memStr(*c.MemRec), c.MemWhy, p), c.MemWhy)
 		}
 	}
 
@@ -101,6 +102,14 @@ func dash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// recColor greens an applied value, but yellows a HOLD (no change made).
+func recColor(val, why string, p Palette) string {
+	if strings.HasPrefix(why, "HOLD") {
+		return p.Yellow(val)
+	}
+	return p.Green(val)
 }
 
 func cpuOrDash(p *int64) string {

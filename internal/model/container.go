@@ -42,6 +42,13 @@ type ContainerAnalysis struct {
 	// the OOM check — memory is non-compressible, so the worst moment is what
 	// matters, not a snapshot. Nil when no time-series source was queried.
 	PeakMemWorkingSet *int64
+
+	// PeakCPUUsage is an optional peak CPU usage in milli-cores over a window
+	// from Prometheus, independent of any HPA. The recommender floors CPU
+	// requests at this value so a recommendation can never fall below what the
+	// container actually used at its worst observed moment. Nil when no
+	// time-series source was queried.
+	PeakCPUUsage *int64
 }
 
 // OOMWorkingSet returns the working set to compare the VPA memory target

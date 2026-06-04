@@ -33,6 +33,7 @@ func mlManagement() model.WorkloadAnalysis {
 			HasVPA:            true,
 			VPA:               model.VPARec{Target: model.Resources{CPUMilli: mi(35), MemBytes: mi(gib16)}},
 			PeakMemWorkingSet: mi(gib15),
+			PeakCPUUsage:      mi(180), // ~18% of 1000m; floor 207m < HPA-stable 360m
 		}},
 		Verdict:           model.VerdictHitsCeiling,
 		Flags:             []model.Flag{model.FlagLowConf, model.FlagGitOps},
@@ -77,23 +78,69 @@ func TestRecommend_MLManagement(t *testing.T) {
 	}
 }
 
-// TestRecommend_NoHPA: without an HPA, CPU should fall back to the VPA target
-// (replicas are fixed, so rightsizing is safe).
+// TestRecommend_NoHPA: without an HPA, CPU falls back to the VPA target — but
+// only when peak data confirms that target is above real usage.
 func TestRecommend_NoHPA(t *testing.T) {
 	a := model.WorkloadAnalysis{
 		Workload: model.Workload{Kind: model.KindDeployment, Name: "demo", Replicas: 1},
 		HPA:      model.HPAInfo{Present: false},
 		Containers: []model.ContainerAnalysis{{
-			Name:     "demo",
-			Requests: model.Resources{CPUMilli: mi(1000)},
-			HasVPA:   true,
-			VPA:      model.VPARec{Target: model.Resources{CPUMilli: mi(25)}},
+			Name:         "demo",
+			Requests:     model.Resources{CPUMilli: mi(1000)},
+			HasVPA:       true,
+			VPA:          model.VPARec{Target: model.Resources{CPUMilli: mi(25)}},
+			PeakCPUUsage: mi(10), // floor 11m < VPA 25m → VPA target wins
 		}},
 		Verdict:         model.VerdictNoHPA,
 		CurrentReplicas: 1,
 	}
 	r := For(a)
 	if r.Containers[0].CPURec == nil || *r.Containers[0].CPURec != 25 {
-		t.Errorf("no-HPA CPURec = %v, want 25 (VPA target)", r.Containers[0].CPURec)
+		t.Errorf("no-HPA CPURec = %v, want 25 (VPA target, above peak)", r.Containers[0].CPURec)
+	}
+}
+
+// TestRecommend_NoPeakHolds: without peak data, the tool must NOT cut below the
+// current request — even if the VPA says to. This is the production-safety gate.
+func TestRecommend_NoPeakHolds(t *testing.T) {
+	a := model.WorkloadAnalysis{
+		Workload: model.Workload{Kind: model.KindDeployment, Name: "x", Replicas: 1},
+		HPA:      model.HPAInfo{Present: false},
+		Containers: []model.ContainerAnalysis{{
+			Name:     "x",
+			Requests: model.Resources{CPUMilli: mi(100), MemBytes: mi(1 << 30)},
+			HasVPA:   true,
+			VPA:      model.VPARec{Target: model.Resources{CPUMilli: mi(25), MemBytes: mi(512 << 20)}},
+			// no PeakCPUUsage / PeakMemWorkingSet
+		}},
+		Verdict: model.VerdictNoHPA, CurrentReplicas: 1,
+	}
+	c := For(a).Containers[0]
+	if c.CPURec == nil || *c.CPURec != 100 {
+		t.Errorf("CPURec = %v, want 100 (hold — no peak data)", c.CPURec)
+	}
+	if c.MemRec == nil || *c.MemRec != (1<<30) {
+		t.Errorf("MemRec = %v, want 1Gi (hold — no peak data)", c.MemRec)
+	}
+}
+
+// TestRecommend_PeakFloorRaises: the floor lifts a too-aggressive VPA target up
+// to real peak usage, so applying it can't starve the workload.
+func TestRecommend_PeakFloorRaises(t *testing.T) {
+	a := model.WorkloadAnalysis{
+		Workload: model.Workload{Kind: model.KindDeployment, Name: "y", Replicas: 1},
+		HPA:      model.HPAInfo{Present: false},
+		Containers: []model.ContainerAnalysis{{
+			Name:         "y",
+			Requests:     model.Resources{CPUMilli: mi(100)},
+			HasVPA:       true,
+			VPA:          model.VPARec{Target: model.Resources{CPUMilli: mi(25)}}, // dangerously low
+			PeakCPUUsage: mi(80),                                                  // real peak → floor 92m
+		}},
+		Verdict: model.VerdictNoHPA, CurrentReplicas: 1,
+	}
+	c := For(a).Containers[0]
+	if c.CPURec == nil || *c.CPURec != 92 {
+		t.Errorf("CPURec = %v, want 92 (floored at peak 80m +15%%, not VPA's unsafe 25m)", c.CPURec)
 	}
 }

@@ -21,9 +21,13 @@ import (
 	"github.com/heinanca/truce/internal/model"
 )
 
-// MemoryMargin is added above the observed peak working set when sizing memory,
-// so the request sits comfortably above the worst observed moment.
-const MemoryMargin = 1.15
+// MemoryMargin / CPUMargin are added above the observed peak when sizing
+// requests, so a recommendation sits comfortably above the worst observed
+// moment and can never starve or OOM the workload.
+const (
+	MemoryMargin = 1.15
+	CPUMargin    = 1.15
+)
 
 // ContainerRec is the recommendation for one container.
 type ContainerRec struct {
@@ -98,29 +102,54 @@ func kedaNote(hpa model.HPAInfo) string {
 func recommendCPU(c model.ContainerAnalysis, m *model.HPAMetric, keda bool) (*int64, string) {
 	now, hasNow := c.Requests.CPU()
 
-	if m != nil && hasNow {
+	// 1. Base value: HPA-stable when a CPU HPA governs it, else the VPA target.
+	var base int64
+	var why string
+	switch {
+	case m != nil && hasNow && hpaStable(m):
 		util, _ := m.UsageUtil()
-		if util != nil && m.TargetUtilization != nil && *m.TargetUtilization > 0 {
-			// Request that lands utilization exactly on target at peak:
-			//   R* = R_now * peakUtil / targetUtil
-			stable := float64(now) * float64(*util) / float64(*m.TargetUtilization)
-			v := int64(math.Round(stable))
-			if v < 1 {
-				v = 1
-			}
-			return &v, fmt.Sprintf("holds the HPA at %d%% under peak load (no scale-out)", *m.TargetUtilization)
+		stable := float64(now) * float64(*util) / float64(*m.TargetUtilization)
+		base = int64(math.Round(stable))
+		if base < 1 {
+			base = 1
+		}
+		why = fmt.Sprintf("holds the HPA at %d%% under peak load (no scale-out)", *m.TargetUtilization)
+	default:
+		v, ok := c.VPA.Target.CPU()
+		if !ok {
+			return nil, ""
+		}
+		base = v
+		if keda {
+			why = "VPA target — KEDA scales on an external trigger, so the CPU request doesn't affect replicas"
+		} else {
+			why = "VPA target — no HPA on CPU, so replicas are unaffected"
 		}
 	}
 
-	// No CPU-coupled HPA metric: the VPA target rightsizes safely.
-	if v, ok := c.VPA.Target.CPU(); ok {
-		vv := v
-		if keda {
-			return &vv, "VPA target — KEDA scales on an external trigger, so the CPU request doesn't affect replicas"
+	// 2. SAFETY INVARIANT — never recommend below real usage, never cut without
+	// peak evidence. The floor (7-day observed peak) holds even when the VPA is
+	// young, so a downsize can never starve the workload.
+	if c.PeakCPUUsage == nil {
+		if hasNow && base < now {
+			n := now
+			return &n, "HOLD — no peak CPU data; not cutting below current (run with --prometheus)"
 		}
-		return &vv, "VPA target — no HPA on CPU, so replicas are unaffected"
+		b := base
+		return &b, why
 	}
-	return nil, ""
+	floor := int64(float64(*c.PeakCPUUsage) * CPUMargin)
+	if floor > base {
+		return &floor, fmt.Sprintf("floored at observed peak CPU +%d%% — safe to apply", int((CPUMargin-1)*100))
+	}
+	b := base
+	return &b, why
+}
+
+// hpaStable reports whether a metric can yield an HPA-stable request.
+func hpaStable(m *model.HPAMetric) bool {
+	util, _ := m.UsageUtil()
+	return util != nil && m.TargetUtilization != nil && *m.TargetUtilization > 0
 }
 
 // recommendMem returns a memory request floored at the observed peak (plus
@@ -130,18 +159,26 @@ func recommendMem(c model.ContainerAnalysis, m *model.HPAMetric) (*int64, string
 	vpa, hasVPA := c.VPA.Target.Mem()
 	peak, fromPeak := c.OOMWorkingSet()
 
+	now, hasNow := c.Requests.Mem()
+
 	// Start from the VPA target (or current if no VPA).
 	var rec int64
 	why := "VPA target"
 	if hasVPA {
 		rec = vpa
-	} else if now, ok := c.Requests.Mem(); ok {
+	} else if hasNow {
 		rec = now
 		why = "current request (no VPA memory target)"
 	}
 
-	// Floor at observed peak * margin — the OOM-safety guarantee.
-	if peak != nil {
+	// SAFETY INVARIANT — memory is non-compressible, so never recommend below the
+	// observed peak, and never cut without peak evidence.
+	if peak == nil {
+		if hasNow && rec < now {
+			n := now
+			return &n, "HOLD — no peak memory data; not cutting below current (run with --prometheus)"
+		}
+	} else {
 		floor := int64(float64(*peak) * MemoryMargin)
 		if floor > rec {
 			rec = floor

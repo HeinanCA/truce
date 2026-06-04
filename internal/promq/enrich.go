@@ -86,6 +86,19 @@ func peakContainers(ctx context.Context, c *Client, o Options, ns, rx string, in
 
 	for i := range containers {
 		ca := &containers[i]
+
+		// Peak CPU usage (milli) for EVERY container — the floor that stops a CPU
+		// recommendation from ever dropping below real usage, with or without an
+		// HPA on CPU.
+		cf := fmt.Sprintf(`,container="%s"`, ca.Name)
+		if cores, found, err := c.queryScalar(ctx, cpuPeakUsageQuery(o, ns, rx, cf)); err != nil {
+			*warns = append(*warns, fmt.Sprintf("container %s cpu: %v", ca.Name, err))
+		} else if found {
+			milli := int64(cores * 1000)
+			ca.PeakCPUUsage = &milli
+		}
+
+		// Peak memory working set for the OOM floor (VPA-recommended containers).
 		if !ca.HasVPA {
 			continue
 		}
@@ -97,11 +110,10 @@ func peakContainers(ctx context.Context, c *Client, o Options, ns, rx string, in
 			*warns = append(*warns, fmt.Sprintf("container %s memory: %v", ca.Name, err))
 			continue
 		}
-		if !found {
-			continue
+		if found {
+			b := int64(bytes)
+			ca.PeakMemWorkingSet = &b
 		}
-		b := int64(bytes)
-		ca.PeakMemWorkingSet = &b
 	}
 	return containers
 }
