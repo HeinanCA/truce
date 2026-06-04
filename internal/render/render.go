@@ -46,6 +46,9 @@ func Render(w io.Writer, r Report, opts Options) error {
 	case "advice":
 		renderHeader(w, r, p)
 		return renderAdvice(w, r, rows, p)
+	case "recommend":
+		renderHeader(w, r, p)
+		return renderRecommendTable(w, r, rows, p)
 	case "wide":
 		renderHeader(w, r, p)
 		return renderTable(w, rows, p, true)
@@ -53,6 +56,6 @@ func Render(w io.Writer, r Report, opts Options) error {
 		renderHeader(w, r, p)
 		return renderTable(w, rows, p, false)
 	default:
-		return fmt.Errorf("unknown output format %q (want advice|table|wide|json|diff)", opts.Format)
+		return fmt.Errorf("unknown output format %q (want advice|recommend|table|wide|json|diff)", opts.Format)
 	}
 }

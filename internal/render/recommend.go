@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"text/tabwriter"
 
+	"github.com/heinanca/truce/internal/model"
 	"github.com/heinanca/truce/internal/recommend"
 	"github.com/heinanca/truce/internal/valuesfile"
 )
@@ -52,6 +54,66 @@ func RenderRecommendation(w io.Writer, rec recommend.Recommendation, p Palette) 
 			fmt.Fprintf(w, "        memory: \"%s\"\n", memStr(*c.MemRec))
 		}
 	}
+}
+
+// renderRecommendTable prints the safe recommended request for every actionable
+// workload in one shot — the paste-ready list. Every value is floored at the
+// observed peak, so nothing here can starve or OOM the workload.
+func renderRecommendTable(w io.Writer, r Report, rows []model.WorkloadAnalysis, p Palette) error {
+	if len(rows) == 0 {
+		fmt.Fprintln(w, p.Dim("No actionable workloads (need a VPA recommendation)."))
+		return nil
+	}
+	if r.SnapshotOnly {
+		fmt.Fprintln(w, p.Yellow("⚠ snapshot basis — values shown HOLD at current (no cut without peak data). Pass --prometheus for real recommendations.\n"))
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "WORKLOAD\tCONTAINER\tCPU\tMEMORY\tWHY")
+	for _, a := range rows {
+		rec := recommend.For(a)
+		for _, c := range rec.Containers {
+			cpu := changeCell(c.CPUNow, c.CPURec, cpuStr, c.CPUWhy, p)
+			mem := changeCell(c.MemNow, c.MemRec, memStr, c.MemWhy, p)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+				a.Workload.Name, c.Name, cpu, mem, shortWhy(c.CPUWhy, c.MemWhy))
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, p.Dim("\nEvery value is floored at the observed 7-day peak +15% — safe to apply. HOLD = no change (insufficient data)."))
+	return nil
+}
+
+// changeCell renders "now→rec", yellow when it's a HOLD (no change).
+func changeCell(now, rec *int64, fmtFn func(int64) string, why string, p Palette) string {
+	if rec == nil {
+		return "—"
+	}
+	nowStr := "—"
+	if now != nil {
+		nowStr = fmtFn(*now)
+	}
+	recStr := fmtFn(*rec)
+	if strings.HasPrefix(why, "HOLD") {
+		return nowStr + "→" + p.Yellow(recStr)
+	}
+	return nowStr + "→" + p.Green(recStr)
+}
+
+// shortWhy picks the most informative one-liner for the row.
+func shortWhy(cpuWhy, memWhy string) string {
+	if strings.HasPrefix(cpuWhy, "holds the HPA") {
+		return "↑ sized to hold HPA at target (stops scale-out)"
+	}
+	if strings.HasPrefix(cpuWhy, "HOLD") || strings.HasPrefix(memWhy, "HOLD") {
+		return "HOLD — no peak data"
+	}
+	if strings.Contains(cpuWhy, "KEDA") {
+		return "KEDA external — request safe"
+	}
+	return "floored at observed peak"
 }
 
 // RenderValuesDiff shows the service's committed values in the file next to the

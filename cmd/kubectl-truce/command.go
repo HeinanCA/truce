@@ -73,7 +73,7 @@ func newRootCommand() *cobra.Command {
 
 	f := cmd.Flags()
 	f.BoolVarP(&o.allNamespaces, "all-namespaces", "A", false, "scan all namespaces")
-	f.StringVarP(&o.output, "output", "o", "table", "output format: advice|table|wide|json|diff")
+	f.StringVarP(&o.output, "output", "o", "table", "output format: recommend|advice|table|wide|json|diff")
 	f.StringVar(&o.sortMode, "sort", "", "sort order: delta|name|verdict (default: problems first)")
 	f.StringSliceVar(&o.only, "only", nil, "show only these verdicts (comma-separated)")
 	f.BoolVar(&o.problemsOnly, "problems-only", false, "show only problem verdicts")
