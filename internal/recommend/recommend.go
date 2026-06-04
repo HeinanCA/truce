@@ -69,7 +69,7 @@ func For(a model.WorkloadAnalysis) Recommendation {
 		rec.CPUNow = c.Requests.CPUMilli
 		rec.MemNow = c.Requests.MemBytes
 
-		rec.CPURec, rec.CPUWhy = recommendCPU(c, cpuMetric)
+		rec.CPURec, rec.CPUWhy = recommendCPU(c, cpuMetric, a.HPA.ManagedByKEDA)
 		rec.MemRec, rec.MemWhy = recommendMem(c, memMetric)
 		r.Containers = append(r.Containers, rec)
 	}
@@ -95,7 +95,7 @@ func kedaNote(hpa model.HPAInfo) string {
 
 // recommendCPU returns the HPA-stable CPU request when an HPA utilization metric
 // governs CPU, else the VPA target (no HPA coupling → replicas are fixed).
-func recommendCPU(c model.ContainerAnalysis, m *model.HPAMetric) (*int64, string) {
+func recommendCPU(c model.ContainerAnalysis, m *model.HPAMetric, keda bool) (*int64, string) {
 	now, hasNow := c.Requests.CPU()
 
 	if m != nil && hasNow {
@@ -112,9 +112,12 @@ func recommendCPU(c model.ContainerAnalysis, m *model.HPAMetric) (*int64, string
 		}
 	}
 
-	// No usable HPA coupling: the VPA target rightsizes safely (replicas fixed).
+	// No CPU-coupled HPA metric: the VPA target rightsizes safely.
 	if v, ok := c.VPA.Target.CPU(); ok {
 		vv := v
+		if keda {
+			return &vv, "VPA target — KEDA scales on an external trigger, so the CPU request doesn't affect replicas"
+		}
 		return &vv, "VPA target — no HPA on CPU, so replicas are unaffected"
 	}
 	return nil, ""
