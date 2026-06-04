@@ -16,7 +16,9 @@ import (
 	"github.com/heinanca/truce/internal/engine"
 	"github.com/heinanca/truce/internal/model"
 	"github.com/heinanca/truce/internal/promq"
+	"github.com/heinanca/truce/internal/recommend"
 	"github.com/heinanca/truce/internal/render"
+	"github.com/heinanca/truce/internal/valuesfile"
 )
 
 // options holds the truce-specific flag values (kube flags live on ConfigFlags).
@@ -33,6 +35,8 @@ type options struct {
 	promURL       string
 	promWindow    string
 	cpuQuantile   float64
+	service       string
+	valuesPath    string
 }
 
 // gateError signals that --fail-on matched; main maps it to a distinct exit code
@@ -69,7 +73,7 @@ func newRootCommand() *cobra.Command {
 
 	f := cmd.Flags()
 	f.BoolVarP(&o.allNamespaces, "all-namespaces", "A", false, "scan all namespaces")
-	f.StringVarP(&o.output, "output", "o", "table", "output format: table|wide|json|diff")
+	f.StringVarP(&o.output, "output", "o", "table", "output format: advice|table|wide|json|diff")
 	f.StringVar(&o.sortMode, "sort", "", "sort order: delta|name|verdict (default: problems first)")
 	f.StringSliceVar(&o.only, "only", nil, "show only these verdicts (comma-separated)")
 	f.BoolVar(&o.problemsOnly, "problems-only", false, "show only problem verdicts")
@@ -79,6 +83,8 @@ func newRootCommand() *cobra.Command {
 	f.StringVar(&o.promURL, "prometheus", "", "Prometheus base URL for peak-aware verdicts (e.g. http://localhost:9090); without it, verdicts use the instantaneous snapshot")
 	f.StringVar(&o.promWindow, "prometheus-window", "7d", "Prometheus look-back window for peak usage")
 	f.Float64Var(&o.cpuQuantile, "cpu-quantile", 0.95, "quantile for peak CPU utilization (memory always uses the max)")
+	f.StringVar(&o.service, "service", "", "recommend HPA-aware, OOM-safe request values for a single workload by name")
+	f.StringVar(&o.valuesPath, "values", "", "path to that service's values file; shows current→recommended as a diff (read-only)")
 
 	return cmd
 }
@@ -171,6 +177,12 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		rows = append(rows, a)
 	}
 
+	// Single-service recommendation mode: compute HPA-aware, OOM-safe values for
+	// one workload and (optionally) diff them against its values file.
+	if o.service != "" {
+		return recommendService(out, o, rows)
+	}
+
 	// Label the basis from what actually happened, not from intent — a SAFE
 	// verdict computed on a snapshot must never be dressed up as peak-aware.
 	basisLabel, snapshotOnly := basisStatus(rows, o, promConfigured, promReachable)
@@ -194,6 +206,40 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 	}
 
 	return gateCheck(rows, failOn)
+}
+
+// recommendService computes and prints the recommendation for one workload,
+// optionally diffing against its values file. It does not write the file.
+func recommendService(out io.Writer, o *options, rows []model.WorkloadAnalysis) error {
+	var found *model.WorkloadAnalysis
+	for i := range rows {
+		if rows[i].Workload.Name == o.service {
+			found = &rows[i]
+			break
+		}
+	}
+	if found == nil {
+		return fmt.Errorf("service %q not found in scope — need a Deployment/StatefulSet/DaemonSet named %q (try -n <namespace> or -A)", o.service, o.service)
+	}
+	if !found.Actionable {
+		return fmt.Errorf("service %q has no VPA recommendation, so there is nothing to recommend", o.service)
+	}
+
+	rec := recommend.For(*found)
+	p := render.NewPalette(o.resolveNoColor(out))
+	if found.UsageBasis != model.BasisPeak {
+		fmt.Fprintln(out, p.Yellow("⚠ snapshot basis — pass --prometheus <url> for peak-aware values; these can miss traffic spikes.\n"))
+	}
+	render.RenderRecommendation(out, rec, p)
+
+	if o.valuesPath != "" {
+		tree, err := valuesfile.Load(o.valuesPath)
+		if err != nil {
+			return err
+		}
+		render.RenderValuesDiff(out, o.valuesPath, valuesfile.FindRequests(tree), rec, p)
+	}
+	return nil
 }
 
 // basisStatus derives the honest usage-basis label and snapshot-only flag from
