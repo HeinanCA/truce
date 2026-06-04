@@ -21,6 +21,14 @@ var vpaGVR = schema.GroupVersionResource{
 	Resource: "verticalpodautoscalers",
 }
 
+// kedaGVR is the dynamic-client coordinate for KEDA ScaledObjects, read so truce
+// can recognize KEDA-managed (external-trigger) autoscaling.
+var kedaGVR = schema.GroupVersionResource{
+	Group:    "keda.sh",
+	Version:  "v1alpha1",
+	Resource: "scaledobjects",
+}
+
 // Scope describes which namespaces to scan.
 type Scope struct {
 	Namespace     string // honored when AllNamespaces is false; "" means default
@@ -38,15 +46,16 @@ func (s Scope) namespace() string {
 // RawCluster holds the unprocessed results of a cluster scan. join.go turns
 // these into model.CollectedWorkload values.
 type RawCluster struct {
-	HPAs         []autoscalingv2.HorizontalPodAutoscaler
-	Deployments  []appsv1.Deployment
-	StatefulSets []appsv1.StatefulSet
-	DaemonSets   []appsv1.DaemonSet
-	ReplicaSets  []appsv1.ReplicaSet
-	Pods         []corev1.Pod
-	PodMetrics   []metricsv1beta1.PodMetrics
-	Nodes        []corev1.Node
-	VPAs         []unstructured.Unstructured
+	HPAs          []autoscalingv2.HorizontalPodAutoscaler
+	Deployments   []appsv1.Deployment
+	StatefulSets  []appsv1.StatefulSet
+	DaemonSets    []appsv1.DaemonSet
+	ReplicaSets   []appsv1.ReplicaSet
+	Pods          []corev1.Pod
+	PodMetrics    []metricsv1beta1.PodMetrics
+	Nodes         []corev1.Node
+	VPAs          []unstructured.Unstructured
+	ScaledObjects []unstructured.Unstructured
 
 	ServerVersion string
 	// VPACRDInstalled is false when the VPA CRD is absent (List returns a
@@ -131,6 +140,11 @@ func Scan(ctx context.Context, c *Clients, scope Scope) (*RawCluster, error) {
 		raw.VPACRDInstalled = true
 	} else {
 		raw.VPAErr = err
+	}
+
+	// KEDA ScaledObjects are optional too — absent CRD is not an error.
+	if soList, err := c.Dynamic.Resource(kedaGVR).Namespace(ns).List(ctx, opts); err == nil {
+		raw.ScaledObjects = soList.Items
 	}
 
 	if ver, err := c.Discovery.ServerVersion(); err == nil {

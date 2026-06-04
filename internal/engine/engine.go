@@ -99,6 +99,9 @@ func Analyze(cw model.CollectedWorkload, opts Options) model.WorkloadAnalysis {
 	flags := newFlagSet()
 
 	// --- Cross-cutting flags independent of the verdict branch. ---
+	if cw.HPA.ManagedByKEDA {
+		flags.add(model.FlagKEDA)
+	}
 	if !opts.InPlaceAvailable {
 		flags.add(model.FlagRestart)
 	}

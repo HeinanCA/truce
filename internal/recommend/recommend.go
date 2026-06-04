@@ -16,6 +16,7 @@ package recommend
 import (
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/heinanca/truce/internal/model"
 )
@@ -75,7 +76,21 @@ func For(a model.WorkloadAnalysis) Recommendation {
 
 	r.RaiseMaxTo = ceilingHeadroom(a)
 	r.Contrast = contrast(a)
+	if a.HPA.ManagedByKEDA {
+		r.Contrast = kedaNote(a.HPA)
+	}
 	return r
+}
+
+// kedaNote explains why a KEDA-managed workload's requests are safe to change:
+// its replica count is driven by an external trigger, not by requests.
+func kedaNote(hpa model.HPAInfo) string {
+	trig := "an external trigger"
+	if len(hpa.KEDATriggers) > 0 {
+		trig = strings.Join(hpa.KEDATriggers, ", ")
+	}
+	return fmt.Sprintf("scaled by KEDA on %s — replicas are external, so request changes are safe; "+
+		"truce rightsizes only and cannot predict KEDA's replica count.", trig)
 }
 
 // recommendCPU returns the HPA-stable CPU request when an HPA utilization metric
