@@ -312,8 +312,13 @@ func buildCostReport(ctx context.Context, o *options, infos []model.NodeInfo, ro
 		DisableAWS:  o.noPricing,
 		Now:         now,
 	}
-	provider := cost.SelectProvider(ctx, infos, cfg)
-	priced := cost.PriceNodes(ctx, provider, infos)
+	// Pricing gets its own budget rather than the leftover scraps of the shared
+	// scan deadline: a 7d Prometheus enrich can eat most of it, starving the last
+	// serial AWS price lookups and wrongly flagging those types PRICE-MISSING.
+	pctx, pcancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+	defer pcancel()
+	provider := cost.SelectProvider(pctx, infos, cfg)
+	priced := cost.PriceNodes(pctx, provider, infos)
 
 	var freedCPU, freedMem int64
 	for _, a := range rows {
