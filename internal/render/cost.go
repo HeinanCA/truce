@@ -41,7 +41,7 @@ func renderCost(w io.Writer, c model.CostReport, p Palette) {
 	fmt.Fprintln(w, p.Dim("  "+c.Note))
 
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "  NODEPOOL\tNODES\tMIX\t$/NODE-HR\tSAVE/MONTH")
+	fmt.Fprintln(tw, "  NODE TYPE\tNODES\tMIX\t$/NODE-HR\tSAVE/MONTH")
 	for _, pool := range c.Pools {
 		fmt.Fprintf(tw, "  %s\t%d\t%s\t%s\t%s\n",
 			pool.Name, pool.NodeCount, mixCol(pool), nodeHrCol(pool, p), monthCol(pool))
