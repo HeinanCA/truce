@@ -73,6 +73,12 @@ func hpaCol(a model.WorkloadAnalysis) string {
 	if a.BindingMetric != nil && a.BindingMetric.TargetUtilization != nil {
 		return fmt.Sprintf("%s:%d%%", a.BindingMetric.Identifier, *a.BindingMetric.TargetUtilization)
 	}
+	if a.HPA.ManagedByKEDA {
+		if len(a.HPA.KEDATriggers) > 0 {
+			return "KEDA:" + a.HPA.KEDATriggers[0]
+		}
+		return "KEDA"
+	}
 	if a.Verdict == model.VerdictDecoupled {
 		return "decoupled"
 	}

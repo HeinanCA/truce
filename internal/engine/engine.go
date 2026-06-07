@@ -49,20 +49,6 @@ func (o Options) tolerance() float64 {
 	return DefaultTolerance
 }
 
-func (o Options) lowConfAge() time.Duration {
-	if o.LowConfAge > 0 {
-		return o.LowConfAge
-	}
-	return DefaultLowConfAge
-}
-
-func (o Options) wideBoundFraction() float64 {
-	if o.WideBoundFraction > 0 {
-		return o.WideBoundFraction
-	}
-	return DefaultWideBoundFraction
-}
-
 // Analyze produces the full verdict for one collected workload. It is a pure
 // function: same inputs always yield the same output.
 //
@@ -99,12 +85,14 @@ func Analyze(cw model.CollectedWorkload, opts Options) model.WorkloadAnalysis {
 	flags := newFlagSet()
 
 	// --- Cross-cutting flags independent of the verdict branch. ---
+	if cw.HPA.ManagedByKEDA {
+		flags.add(model.FlagKEDA)
+	}
 	if !opts.InPlaceAvailable {
 		flags.add(model.FlagRestart)
 	}
-	if lowConfidence(cw, opts) {
-		flags.add(model.FlagLowConf)
-	}
+	// Recommendation confidence no longer comes from VPA age/bound width — it
+	// comes from the measured usage spread (SPIKY), raised by the recommender.
 
 	// --- Verdict. ---
 	switch {
@@ -165,36 +153,6 @@ func usageBasis(cw model.CollectedWorkload) model.UsageBasis {
 		}
 	}
 	return model.BasisSnapshot
-}
-
-// lowConfidence reports whether the VPA recommendation should be treated as
-// low-confidence: the VPA is young, or any recommended band is wide.
-func lowConfidence(cw model.CollectedWorkload, opts Options) bool {
-	if !opts.Now.IsZero() && !cw.VPACreated.IsZero() {
-		if opts.Now.Sub(cw.VPACreated) < opts.lowConfAge() {
-			return true
-		}
-	}
-	frac := opts.wideBoundFraction()
-	for _, c := range cw.Containers {
-		if !c.HasVPA {
-			continue
-		}
-		if wideBand(c.VPA.Target.CPUMilli, c.VPA.LowerBound.CPUMilli, frac) ||
-			wideBand(c.VPA.Target.MemBytes, c.VPA.LowerBound.MemBytes, frac) {
-			return true
-		}
-	}
-	return false
-}
-
-// wideBand reports whether (target-lower)/target exceeds frac. Unset values or a
-// non-positive target make the band uninformative (not wide).
-func wideBand(target, lower *int64, frac float64) bool {
-	if target == nil || lower == nil || *target <= 0 {
-		return false
-	}
-	return float64(*target-*lower)/float64(*target) > frac
 }
 
 // flagSet is a tiny ordered, de-duplicated flag collector.
