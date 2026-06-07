@@ -73,6 +73,53 @@ func TestEstimate_BlendedMixAndSavings(t *testing.T) {
 	}
 }
 
+// TestEstimate_CostWeightedAttribution is the regression for the count-share bug:
+// a small but expensive on-demand pool must still get savings attributed (it was
+// being rounded to $0 and showed a blank SAVE/MONTH while the cheap spot pool took
+// all the credit).
+func TestEstimate_CostWeightedAttribution(t *testing.T) {
+	now := time.Date(2026, 6, 7, 0, 0, 0, 0, time.UTC)
+	priced := []PricedNode{
+		// 1 pricey on-demand node in its own pool (1/5 of nodes, but 1/2 of cost).
+		{node("c8i", "c8i.4xlarge", model.CapacityOnDemand, 4000, gib16), model.NodeHourly{USDPerHour: 0.40, Source: model.PriceAWSOnDemand}},
+		// 4 cheap spot nodes.
+		{node("default", "m5.large", model.CapacitySpot, 4000, gib16), model.NodeHourly{USDPerHour: 0.10, Source: model.PriceAWSSpot, AsOf: now}},
+		{node("default", "m5.large", model.CapacitySpot, 4000, gib16), model.NodeHourly{USDPerHour: 0.10, Source: model.PriceAWSSpot, AsOf: now}},
+		{node("default", "m5.large", model.CapacitySpot, 4000, gib16), model.NodeHourly{USDPerHour: 0.10, Source: model.PriceAWSSpot, AsOf: now}},
+		{node("default", "m5.large", model.CapacitySpot, 4000, gib16), model.NodeHourly{USDPerHour: 0.10, Source: model.PriceAWSSpot, AsOf: now}},
+	}
+	// Free 2 nodes' worth on both dimensions → low=high=2.
+	r := Estimate(priced, model.PriceAWSOnDemand, 8000, 2*gib16, now)
+
+	var c8i, def model.NodePoolCost
+	for _, p := range r.Pools {
+		switch p.Name {
+		case "c8i.4xlarge":
+			c8i = p
+		case "m5.large":
+			def = p
+		}
+	}
+	// The expensive 1-node pool must NOT be zeroed.
+	if c8i.MonthlyHigh <= 0 {
+		t.Fatalf("c8i pool savings zeroed (the bug): %+v", c8i)
+	}
+	// clusterUSDSum = 0.40 + 4×0.10 = 0.80; c8i weight = 0.40/0.80 = 0.5.
+	// clusterBlended = 0.80/5 = 0.16; clusterMonthly = 2×0.16×730 = 233.6.
+	wantTotal := 2 * (0.80 / 5) * HoursPerMonth
+	if r.TotalMonthlyHigh < wantTotal-0.5 || r.TotalMonthlyHigh > wantTotal+0.5 {
+		t.Errorf("TotalMonthlyHigh = %v, want ~%v", r.TotalMonthlyHigh, wantTotal)
+	}
+	// c8i (½ the cost) gets ~½ the savings despite being 1 of 5 nodes.
+	if c8i.MonthlyHigh < def.MonthlyHigh-0.5 || c8i.MonthlyHigh > def.MonthlyHigh+0.5 {
+		t.Errorf("expected c8i ≈ default savings (cost-weighted): c8i=%v default=%v", c8i.MonthlyHigh, def.MonthlyHigh)
+	}
+	// Pools sum to the cluster total (no rounding loss).
+	if sum := c8i.MonthlyHigh + def.MonthlyHigh; sum < r.TotalMonthlyHigh-0.01 || sum > r.TotalMonthlyHigh+0.01 {
+		t.Errorf("pool sum %v != total %v", sum, r.TotalMonthlyHigh)
+	}
+}
+
 func TestEstimate_PriceMissingStillReportsSavings(t *testing.T) {
 	now := time.Date(2026, 6, 4, 0, 0, 0, 0, time.UTC)
 	priced := []PricedNode{
