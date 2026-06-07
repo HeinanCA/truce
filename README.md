@@ -106,6 +106,43 @@ Flags: `-n/--namespace`, `-A/--all-namespaces`, `-o table|wide|json|diff`,
 `--tolerance`, `--no-color`, `--prometheus`, `--prometheus-window`,
 `--cpu-quantile`. Inherits `--context` / `--kubeconfig`.
 
+## Recommended values for one service (the payoff)
+
+The table tells you *what will happen*; `--service` tells you *what to set* — a
+single request value that is better than what VPA or HPA produce alone:
+
+```sh
+kubectl truce -n neteera --prometheus http://localhost:9090 \
+  --service ml-management --values ./charts/ml-management/values.fda
+```
+
+```
+RECOMMENDED VALUES — ml-management  (PROVISIONAL — VPA history < 48h)
+  VPA target alone → HPA pegs the ceiling (1→10 replicas, -650m cpu). truce keeps it stable.
+
+  ml-management
+    cpu:    1 → 360m   (holds the HPA at 50% under peak load (no scale-out))
+    memory: 2Gi → 1.7Gi   (floored at observed peak working set +15% (OOM-safe))
+
+  ⚠ This workload hits its HPA ceiling — raise maxReplicas to ≥ 15.
+
+📄 ./charts/ml-management/values.fda
+  at ml-management:
+    cpu:    1 → 360m
+    memory: 2Gi → 1.7Gi
+```
+
+- **CPU** is sized to hold the HPA at its target *under peak load* — recovering
+  the over-provisioning without triggering a scale-out (VPA's `35m` here would
+  drive the HPA to 10 replicas).
+- **Memory** is floored at the observed peak (plus margin) — never below real
+  usage, so a downsize can't cause an OOM.
+- It flags when **maxReplicas** is the real bottleneck — advice neither VPA nor
+  HPA gives.
+- `--values <file>` reads your env's values file (read-only) and shows the
+  current committed requests next to the recommendation, PR-ready. truce never
+  writes the file.
+
 ## Peak-aware verdicts (recommended)
 
 By default truce predicts from the HPA's **instantaneous** utilization — a single
@@ -117,7 +154,7 @@ Point it at Prometheus and verdicts are computed from **peak** usage instead:
 
 ```sh
 kubectl port-forward -n monitoring svc/prometheus 9090:9090 &
-kubectl truce -A --prometheus http://localhost:9090 --prometheus-window 7d
+kubectl truce -A --prometheus http://localhost:9090 --window 7d
 ```
 
 - **CPU** uses the P95 of per-pod usage over the window (`--cpu-quantile` to tune)
@@ -132,6 +169,40 @@ window baked into the PromQL. Pods are matched by name pattern per workload kind
 metrics `container_cpu_usage_seconds_total` and `container_memory_working_set_bytes`.
 
 **Exit codes:** `0` clean · `1` operational error · `3` `--fail-on` matched.
+
+## Cost estimate (built-in pricing)
+
+truce translates the freed CPU/memory into a dollar figure. Pricing is built in
+and provider-pluggable — **no manual price entry on AWS**:
+
+- **AWS nodes + resolvable AWS credentials → the AWS backend (default).** Each
+  node is priced by its `karpenter.sh/capacity-type`: on-demand from the EC2
+  **Price List API** (`pricing:GetProducts`, keyed on instance type + region),
+  spot from **`ec2:DescribeSpotPriceHistory`** (latest price for the type + AZ).
+  Lookups are cached on disk (`--pricing-cache-ttl`, default 24h).
+- **Otherwise → static.** `--pricing-file` (an `instanceType: USD/hr` map) or a
+  flat `--node-cost`.
+- **No price at all → PRICE-MISSING.** truce still reports node/resource savings;
+  only the dollar figure drops out. `--no-pricing` forces this path.
+
+The cluster bottom line is headlined *"up to $X/month (estimated, assumes
+consolidation; spot priced at current)"*. Spot is variable and per-AZ, so
+spot-derived numbers are dated; the blended `$/node-hr` notes how many nodes are
+spot vs on-demand. A type that fails to price is flagged, not fatal.
+
+**AWS IAM (read-only, granted via IRSA or the node instance role — NOT Kubernetes
+RBAC):**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["pricing:GetProducts", "ec2:DescribeSpotPriceHistory"],
+    "Resource": "*"
+  }]
+}
+```
 
 ## Read-only guarantee
 
@@ -168,6 +239,12 @@ Honest about what truce does **not** do:
   DaemonSets. Bare pods are skipped (and counted). Matching is via ownerReferences,
   never label selectors, so unusual ownership chains may not resolve.
 - **DaemonSets have no HPA**, so they only ever produce `NO HPA` rightsizing.
+- **KEDA is recognized but not predicted.** truce detects KEDA-managed workloads
+  (via the generated HPA / `ScaledObject`), labels them `KEDA:<trigger>`, and
+  notes that request changes are safe because scaling is external. It cannot
+  predict KEDA's replica count (driven by the external trigger it doesn't read)
+  or its scale-to-zero behavior (invisible to the HPA). A KEDA `cpu`/`memory`
+  trigger, however, surfaces as a `Resource` metric and is predicted normally.
 - **Live requests are read from a representative running pod.** If pods within one
   workload have divergent requests, the representative may not capture every case.
 

@@ -12,11 +12,14 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 
 	"github.com/heinanca/truce/internal/collect"
+	"github.com/heinanca/truce/internal/cost"
 	"github.com/heinanca/truce/internal/detect"
 	"github.com/heinanca/truce/internal/engine"
 	"github.com/heinanca/truce/internal/model"
 	"github.com/heinanca/truce/internal/promq"
+	"github.com/heinanca/truce/internal/recommend"
 	"github.com/heinanca/truce/internal/render"
+	"github.com/heinanca/truce/internal/valuesfile"
 )
 
 // options holds the truce-specific flag values (kube flags live on ConfigFlags).
@@ -31,8 +34,19 @@ type options struct {
 	tolerance     float64
 	noColor       bool
 	promURL       string
-	promWindow    string
+	window        string
 	cpuQuantile   float64
+	cpuHeadroom   float64
+	memHeadroom   float64
+	baseline      string
+	setCPULimit   bool
+	service       string
+	valuesPath    string
+
+	pricingFile string
+	nodeCost    float64
+	noPricing   bool
+	cacheTTLHrs float64
 }
 
 // gateError signals that --fail-on matched; main maps it to a distinct exit code
@@ -69,7 +83,7 @@ func newRootCommand() *cobra.Command {
 
 	f := cmd.Flags()
 	f.BoolVarP(&o.allNamespaces, "all-namespaces", "A", false, "scan all namespaces")
-	f.StringVarP(&o.output, "output", "o", "table", "output format: table|wide|json|diff")
+	f.StringVarP(&o.output, "output", "o", "table", "output format: recommend|advice|table|wide|json|diff")
 	f.StringVar(&o.sortMode, "sort", "", "sort order: delta|name|verdict (default: problems first)")
 	f.StringSliceVar(&o.only, "only", nil, "show only these verdicts (comma-separated)")
 	f.BoolVar(&o.problemsOnly, "problems-only", false, "show only problem verdicts")
@@ -77,8 +91,18 @@ func newRootCommand() *cobra.Command {
 	f.Float64Var(&o.tolerance, "tolerance", engine.DefaultTolerance, "fallback HPA tolerance when not set on the HPA")
 	f.BoolVar(&o.noColor, "no-color", false, "disable ANSI color")
 	f.StringVar(&o.promURL, "prometheus", "", "Prometheus base URL for peak-aware verdicts (e.g. http://localhost:9090); without it, verdicts use the instantaneous snapshot")
-	f.StringVar(&o.promWindow, "prometheus-window", "7d", "Prometheus look-back window for peak usage")
-	f.Float64Var(&o.cpuQuantile, "cpu-quantile", 0.95, "quantile for peak CPU utilization (memory always uses the max)")
+	f.StringVar(&o.window, "window", "7d", "Prometheus look-back window for the usage spread (cpu p50/p95/max, mem p95/max)")
+	f.Float64Var(&o.cpuQuantile, "cpu-quantile", 0.95, "quantile treated as cpu_p95 (memory p95 uses the same quantile; max always uses the max)")
+	f.Float64Var(&o.cpuHeadroom, "cpu-headroom", 1.2, "multiplier over the CPU basis (cpu_max HPA-coupled, else cpu_p95) for the request")
+	f.Float64Var(&o.memHeadroom, "mem-headroom", 1.25, "multiplier over mem_max for the memory request")
+	f.StringVar(&o.baseline, "baseline", "p95", "re-prediction baseline: p95 or p50")
+	f.BoolVar(&o.setCPULimit, "set-cpu-limit", false, "also recommend a CPU limit = ceil(cpu_max × 1.5) (default: leave unset for burst)")
+	f.StringVar(&o.pricingFile, "pricing-file", "", "static instanceType→USD/hr map (YAML/JSON) for non-AWS clusters; AWS pricing is built in and auto-selected")
+	f.Float64Var(&o.nodeCost, "node-cost", 0, "flat USD/node-hr static fallback when no per-type or AWS price is available")
+	f.BoolVar(&o.noPricing, "no-pricing", false, "skip the AWS pricing backend (use static/PRICE-MISSING only)")
+	f.Float64Var(&o.cacheTTLHrs, "pricing-cache-ttl", 24, "hours to cache AWS price lookups on disk")
+	f.StringVar(&o.service, "service", "", "recommend HPA-aware, OOM-safe request values for a single workload by name")
+	f.StringVar(&o.valuesPath, "values", "", "path to that service's values file; shows current→recommended as a diff (read-only)")
 
 	return cmd
 }
@@ -93,6 +117,9 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 	failOn, err := parseVerdicts(o.failOn)
 	if err != nil {
 		return err
+	}
+	if o.baseline != "p95" && o.baseline != "p50" {
+		return fmt.Errorf("invalid --baseline %q (want p95 or p50)", o.baseline)
 	}
 
 	clients, err := collect.NewClients(o.configFlags)
@@ -133,7 +160,7 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		} else {
 			promReachable = true
 			popts := promq.DefaultOptions()
-			popts.Window = o.promWindow
+			popts.Window = o.window
 			popts.CPUQuantile = o.cpuQuantile
 			enriched, warns := promq.Enrich(ctx, pc, workloads, popts)
 			workloads = enriched
@@ -171,9 +198,19 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		rows = append(rows, a)
 	}
 
+	// Single-service recommendation mode: compute HPA-aware, OOM-safe values for
+	// one workload and (optionally) diff them against its values file.
+	if o.service != "" {
+		return recommendService(out, o, rows)
+	}
+
 	// Label the basis from what actually happened, not from intent — a SAFE
 	// verdict computed on a snapshot must never be dressed up as peak-aware.
 	basisLabel, snapshotOnly := basisStatus(rows, o, promConfigured, promReachable)
+
+	// Estimate the dollar impact of the recommendations. Pricing is built in and
+	// provider-pluggable; this never fails the run (PRICE-MISSING on no price).
+	costReport := buildCostReport(ctx, o, collect.NodeInfos(raw.Nodes), rows)
 
 	report := render.Report{
 		Cluster:         cluster,
@@ -181,6 +218,7 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		Workloads:       rows,
 		UsageBasisLabel: basisLabel,
 		SnapshotOnly:    snapshotOnly,
+		Cost:            costReport,
 	}
 	ropts := render.Options{
 		Format:       o.output,
@@ -188,12 +226,47 @@ func run(ctx context.Context, o *options, out io.Writer) error {
 		Sort:         render.SortMode(o.sortMode),
 		Only:         only,
 		ProblemsOnly: o.problemsOnly,
+		Rec:          o.recConfig(),
 	}
 	if err := render.Render(out, report, ropts); err != nil {
 		return err
 	}
 
 	return gateCheck(rows, failOn)
+}
+
+// recommendService computes and prints the recommendation for one workload,
+// optionally diffing against its values file. It does not write the file.
+func recommendService(out io.Writer, o *options, rows []model.WorkloadAnalysis) error {
+	var found *model.WorkloadAnalysis
+	for i := range rows {
+		if rows[i].Workload.Name == o.service {
+			found = &rows[i]
+			break
+		}
+	}
+	if found == nil {
+		return fmt.Errorf("service %q not found in scope — need a Deployment/StatefulSet/DaemonSet named %q (try -n <namespace> or -A)", o.service, o.service)
+	}
+	if !found.Actionable {
+		return fmt.Errorf("service %q has no VPA recommendation, so there is nothing to recommend", o.service)
+	}
+
+	rec := recommend.ForWith(*found, o.recConfig())
+	p := render.NewPalette(o.resolveNoColor(out))
+	if found.UsageBasis != model.BasisPeak {
+		fmt.Fprintln(out, p.Yellow("⚠ snapshot basis — pass --prometheus <url> for peak-aware values; these can miss traffic spikes.\n"))
+	}
+	render.RenderRecommendation(out, rec, p)
+
+	if o.valuesPath != "" {
+		tree, err := valuesfile.Load(o.valuesPath)
+		if err != nil {
+			return err
+		}
+		render.RenderValuesDiff(out, o.valuesPath, valuesfile.FindRequests(tree), rec, p)
+	}
+	return nil
 }
 
 // basisStatus derives the honest usage-basis label and snapshot-only flag from
@@ -220,9 +293,63 @@ func basisStatus(rows []model.WorkloadAnalysis, o *options, configured, reachabl
 		return fmt.Sprintf("snapshot — Prometheus reachable at %s but returned no usable data (check metric names / pod-name match); verdicts fell back to the snapshot", o.promURL), true
 	case peak < actionable:
 		return fmt.Sprintf("Prometheus peak (P%.0f CPU / max memory over %s) for %d of %d workloads; the rest fell back to snapshot — see stderr warnings",
-			o.cpuQuantile*100, o.promWindow, peak, actionable), false
+			o.cpuQuantile*100, o.window, peak, actionable), false
 	default:
-		return fmt.Sprintf("Prometheus peak — P%.0f CPU / max memory over %s", o.cpuQuantile*100, o.promWindow), false
+		return fmt.Sprintf("Prometheus peak — P%.0f CPU / max memory over %s", o.cpuQuantile*100, o.window), false
+	}
+}
+
+// buildCostReport prices the cluster's nodes and translates the recommendations'
+// freed resources into a dollar estimate. It is read-only: node metadata comes
+// from the already-collected nodes, and only read-only AWS APIs are called.
+func buildCostReport(ctx context.Context, o *options, infos []model.NodeInfo, rows []model.WorkloadAnalysis) model.CostReport {
+	now := time.Now()
+	cfg := cost.Config{
+		PricingFile: o.pricingFile,
+		NodeCost:    o.nodeCost,
+		CacheDir:    pricingCacheDir(),
+		CacheTTL:    time.Duration(o.cacheTTLHrs * float64(time.Hour)),
+		DisableAWS:  o.noPricing,
+		Now:         now,
+	}
+	provider := cost.SelectProvider(ctx, infos, cfg)
+	priced := cost.PriceNodes(ctx, provider, infos)
+
+	var freedCPU, freedMem int64
+	for _, a := range rows {
+		if !a.Actionable {
+			continue
+		}
+		d := recommend.ForWith(a, o.recConfig()).FootprintDelta
+		if d.CPUMilli < 0 {
+			freedCPU += -d.CPUMilli
+		}
+		if d.MemBytes < 0 {
+			freedMem += -d.MemBytes
+		}
+	}
+	return cost.Estimate(priced, provider.Backend(), freedCPU, freedMem, now)
+}
+
+// pricingCacheDir returns the on-disk cache directory for AWS price lookups,
+// under the user cache dir; "" disables caching if it cannot be resolved.
+func pricingCacheDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return base + "/truce/pricing"
+}
+
+// recConfig builds the recommendation sizing config from the flags.
+func (o *options) recConfig() recommend.Config {
+	return recommend.Config{
+		Window:      o.window,
+		CPUHeadroom: o.cpuHeadroom,
+		MemHeadroom: o.memHeadroom,
+		Baseline:    o.baseline,
+		SetCPULimit: o.setCPULimit,
+		Tolerance:   o.tolerance,
 	}
 }
 

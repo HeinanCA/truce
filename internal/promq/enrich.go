@@ -86,22 +86,53 @@ func peakContainers(ctx context.Context, c *Client, o Options, ns, rx string, in
 
 	for i := range containers {
 		ca := &containers[i]
-		if !ca.HasVPA {
-			continue
-		}
-		if _, ok := ca.VPA.Target.Mem(); !ok {
-			continue // no memory target -> no OOM comparison to refine
-		}
-		bytes, found, err := c.queryScalar(ctx, memPeakMaxQuery(o, ns, rx, ca.Name))
-		if err != nil {
-			*warns = append(*warns, fmt.Sprintf("container %s memory: %v", ca.Name, err))
-			continue
-		}
-		if !found {
-			continue
-		}
-		b := int64(bytes)
-		ca.PeakMemWorkingSet = &b
+		cf := fmt.Sprintf(`,container="%s"`, ca.Name)
+
+		// CPU spread (milli) for EVERY container — the recommender sizes from
+		// cpu_max (HPA-coupled) or cpu_p95 (Burstable), and re-predicts the HPA
+		// from the chosen baseline. Independent of any HPA on the workload.
+		ca.Spread.CPUP50 = cpuScalar(ctx, c, cpuQuantileQuery(o, ns, rx, cf, 0.5), ca.Name, "cpu_p50", warns)
+		ca.Spread.CPUP95 = cpuScalar(ctx, c, cpuQuantileQuery(o, ns, rx, cf, o.CPUQuantile), ca.Name, "cpu_p95", warns)
+		ca.Spread.CPUMax = cpuScalar(ctx, c, cpuMaxQuery(o, ns, rx, cf), ca.Name, "cpu_max", warns)
+		// Legacy floor field: the worst observed CPU moment.
+		ca.PeakCPUUsage = ca.Spread.CPUMax
+
+		// Memory spread (bytes). mem_max drives the request and the OOM guard;
+		// mem_p95 is surfaced for context.
+		ca.Spread.MemP95 = memScalar(ctx, c, memQuantileQuery(o, ns, rx, ca.Name, o.CPUQuantile), ca.Name, "mem_p95", warns)
+		ca.Spread.MemMax = memScalar(ctx, c, memPeakMaxQuery(o, ns, rx, ca.Name), ca.Name, "mem_max", warns)
+		// Legacy OOM-floor field: the worst observed working set.
+		ca.PeakMemWorkingSet = ca.Spread.MemMax
 	}
 	return containers
+}
+
+// cpuScalar runs a CPU query (result in cores) and returns the value in
+// milli-cores, or nil when there was no data. Errors are collected as warnings.
+func cpuScalar(ctx context.Context, c *Client, q, container, label string, warns *[]string) *int64 {
+	cores, found, err := c.queryScalar(ctx, q)
+	if err != nil {
+		*warns = append(*warns, fmt.Sprintf("container %s %s: %v", container, label, err))
+		return nil
+	}
+	if !found {
+		return nil
+	}
+	milli := int64(cores * 1000)
+	return &milli
+}
+
+// memScalar runs a memory query (result in bytes) and returns the value, or nil
+// when there was no data. Errors are collected as warnings.
+func memScalar(ctx context.Context, c *Client, q, container, label string, warns *[]string) *int64 {
+	bytes, found, err := c.queryScalar(ctx, q)
+	if err != nil {
+		*warns = append(*warns, fmt.Sprintf("container %s %s: %v", container, label, err))
+		return nil
+	}
+	if !found {
+		return nil
+	}
+	b := int64(bytes)
+	return &b
 }

@@ -181,7 +181,9 @@ func cases() []wsCase {
 			deltaCPU: -400, deltaMem: 4*mib400 - 4*mib512, // -469762048
 		},
 		{
-			name: "7_low_confidence_young_vpa",
+			// Young VPA no longer raises LOW-CONF: recommendation confidence comes
+			// from the measured usage spread (SPIKY), not the VPA's age/bounds.
+			name: "7_young_vpa_no_lowconf",
 			cw: model.CollectedWorkload{
 				Workload:   model.Workload{Kind: model.KindDeployment, Name: "new", Replicas: 4},
 				HPA:        hpa(1, 10, resMetric(model.ResourceCPU, 80, 70)),
@@ -191,7 +193,7 @@ func cases() []wsCase {
 			opts:       Options{InPlaceAvailable: true, Now: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)},
 			actionable: true,
 			verdict:    model.VerdictSafe, replicas: 4, predUtil: pi(74),
-			flags:    []model.Flag{model.FlagLowConf},
+			flags:    nil,
 			deltaCPU: -200, deltaMem: 0,
 		},
 		{

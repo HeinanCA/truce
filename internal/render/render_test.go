@@ -16,7 +16,7 @@ func sampleReport() Report {
 	scaleOut := model.WorkloadAnalysis{
 		Workload:             model.Workload{Kind: model.KindDeployment, Namespace: "prod", Name: "web", Replicas: 4},
 		HPA:                  model.HPAInfo{Present: true, MinReplicas: 1, MaxReplicas: 10},
-		Containers:           []model.ContainerAnalysis{{Name: "app", Requests: model.Resources{CPUMilli: mi(1000)}, HasVPA: true, VPA: model.VPARec{Target: model.Resources{CPUMilli: mi(500)}}}},
+		Containers:           []model.ContainerAnalysis{{Name: "app", Requests: model.Resources{CPUMilli: mi(1000)}, HasVPA: true, VPA: model.VPARec{Target: model.Resources{CPUMilli: mi(500)}}, Spread: model.Spread{CPUP50: mi(300), CPUP95: mi(400), CPUMax: mi(500)}}},
 		Actionable:           true,
 		Verdict:              model.VerdictScaleOut,
 		CurrentReplicas:      4,
@@ -94,7 +94,9 @@ func TestRenderJSON(t *testing.T) {
 
 func TestRenderDiff(t *testing.T) {
 	out := renderTo(t, "diff")
-	for _, want := range []string{"kind: Deployment", "name: web", "cpu: \"500m\"", "kubectl -n prod patch deployment web", "verdict=SCALE-OUT"} {
+	// No coupled CPU HPA metric on the fixture → sized to cpu_p95 (400) × 1.2 = 480m,
+	// truce's own number — never the raw VPA target.
+	for _, want := range []string{"kind: Deployment", "name: web", "cpu: \"480m\"", "kubectl -n prod patch deployment web", "verdict=SCALE-OUT"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("diff output missing %q\n---\n%s", want, out)
 		}

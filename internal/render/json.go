@@ -13,6 +13,7 @@ type jsonReport struct {
 	Cluster     model.ClusterStatus      `json:"cluster"`
 	Diagnostics model.Diagnostics        `json:"diagnostics"`
 	Workloads   []model.WorkloadAnalysis `json:"workloads"`
+	Cost        model.CostReport         `json:"cost"`
 }
 
 // renderJSON emits the filtered report as indented JSON.
@@ -21,6 +22,7 @@ func renderJSON(w io.Writer, r Report, rows []model.WorkloadAnalysis) error {
 		Cluster:     r.Cluster,
 		Diagnostics: r.Diagnostics,
 		Workloads:   rows,
+		Cost:        r.Cost,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

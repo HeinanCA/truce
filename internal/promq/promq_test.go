@@ -73,6 +73,22 @@ func TestQueryBuilders(t *testing.T) {
 			t.Errorf("mem query missing %q:\n%s", want, mem)
 		}
 	}
+
+	cf := `,container="app"`
+	p50 := cpuQuantileQuery(o, "prod", "api-.*", cf, 0.5)
+	if !strings.Contains(p50, "quantile_over_time(0.5,") || !strings.Contains(p50, "rate(container_cpu_usage_seconds_total") {
+		t.Errorf("cpu p50 query wrong:\n%s", p50)
+	}
+	cpuMax := cpuMaxQuery(o, "prod", "api-.*", cf)
+	if !strings.Contains(cpuMax, "max_over_time(avg(sum by (pod)") || !strings.Contains(cpuMax, "[7d:5m]") {
+		t.Errorf("cpu max query wrong:\n%s", cpuMax)
+	}
+	memP95 := memQuantileQuery(o, "prod", "api-.*", "app", 0.95)
+	for _, want := range []string{"quantile_over_time(0.95,", "container_memory_working_set_bytes", `container="app"`, "[7d:1m]"} {
+		if !strings.Contains(memP95, want) {
+			t.Errorf("mem p95 query missing %q:\n%s", want, memP95)
+		}
+	}
 }
 
 func TestConsideredRequestSum(t *testing.T) {
