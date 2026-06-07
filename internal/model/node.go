@@ -25,15 +25,18 @@ type NodeInfo struct {
 	AllocMemBytes int64 // allocatable memory, bytes
 }
 
-// PoolKey groups nodes into a NodePool for the cost block: the Karpenter
-// NodePool when labeled, otherwise the instance type so even un-pooled clusters
-// get a meaningful grouping.
+// PoolKey groups nodes for the cost block by their real instance type — the
+// actual node shape, and what determines price. A single Karpenter NodePool
+// (e.g. "default") launches many heterogeneous types, so grouping by NodePool
+// name would collapse them all into one meaningless row; grouping by instance
+// type shows the real fleet. NodePool is the fallback only when the type label
+// is missing.
 func (n NodeInfo) PoolKey() string {
-	if n.NodePool != "" {
-		return n.NodePool
-	}
 	if n.InstanceType != "" {
 		return n.InstanceType
+	}
+	if n.NodePool != "" {
+		return n.NodePool
 	}
 	return "unknown"
 }

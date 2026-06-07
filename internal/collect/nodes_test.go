@@ -54,8 +54,11 @@ func TestNodeInfos(t *testing.T) {
 	if a.Capacity != model.CapacitySpot {
 		t.Errorf("node a capacity = %q, want spot", a.Capacity)
 	}
-	if a.NodePool != "default" || a.PoolKey() != "default" {
-		t.Errorf("node a pool = %q", a.NodePool)
+	if a.NodePool != "default" {
+		t.Errorf("node a NodePool = %q, want default", a.NodePool)
+	}
+	if a.PoolKey() != "m5.large" {
+		t.Errorf("node a PoolKey = %q, want m5.large (grouped by real type, not NodePool name)", a.PoolKey())
 	}
 	if a.AllocCPUMilli != 2000 || a.AllocMemBytes != 8*1024*1024*1024 {
 		t.Errorf("node a alloc = %d/%d", a.AllocCPUMilli, a.AllocMemBytes)

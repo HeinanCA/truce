@@ -106,39 +106,40 @@ func Estimate(priced []PricedNode, backend model.PriceSource, freedCPU, freedMem
 		clusterBlended = clusterUSDSum / float64(clusterPriced)
 	}
 
-	total := len(priced)
+	// Cluster savings: the saved-node range valued at the cluster-blended rate.
+	clusterMonthlyLow := float64(low) * clusterBlended * HoursPerMonth
+	clusterMonthlyHigh := float64(high) * clusterBlended * HoursPerMonth
+
 	for _, key := range order {
 		pc := pools[key]
+		pricedCount := pricedNodeCount(pc, priced)
 		// Finish the per-pool blended average over its priced nodes.
-		if n := pricedNodeCount(pc, priced); n > 0 {
-			pc.BlendedHourly /= float64(n)
+		if pricedCount > 0 {
+			pc.BlendedHourly /= float64(pricedCount)
 		}
 		sort.Strings(pc.InstanceTypes)
 		sort.Strings(pc.MissingTypes)
 
-		// Attribute the cluster's saved-node range to this pool by node share, and
-		// value it at the pool's blended rate.
-		share := 0.0
-		if total > 0 {
-			share = float64(pc.NodeCount) / float64(total)
+		// Attribute cluster savings by each pool's share of total cluster COST,
+		// not node count: retiring a pricey on-demand node saves far more than a
+		// cheap spot node, so a small expensive pool must not round out of the
+		// estimate (the count-share bug that zeroed a 1-node on-demand pool).
+		poolHourlyCost := pc.BlendedHourly * float64(pricedCount)
+		weight := 0.0
+		if clusterUSDSum > 0 {
+			weight = poolHourlyCost / clusterUSDSum
 		}
-		poolLow := int(math.Round(float64(low) * share))
-		poolHigh := int(math.Round(float64(high) * share))
-		pc.NodesSavedLow, pc.NodesSavedHigh = poolLow, poolHigh
-		pc.MonthlyLow = float64(poolLow) * pc.BlendedHourly * HoursPerMonth
-		pc.MonthlyHigh = float64(poolHigh) * pc.BlendedHourly * HoursPerMonth
+		pc.MonthlyLow = clusterMonthlyLow * weight
+		pc.MonthlyHigh = clusterMonthlyHigh * weight
+		pc.NodesSavedLow = int(math.Round(float64(low) * weight))
+		pc.NodesSavedHigh = int(math.Round(float64(high) * weight))
 
 		r.Pools = append(r.Pools, *pc)
-		r.TotalMonthlyLow += pc.MonthlyLow
-		r.TotalMonthlyHigh += pc.MonthlyHigh
 	}
 
-	// When pools rounded to zero but the cluster has headroom, fall back to a
-	// cluster-blended figure so the bottom line isn't misleadingly $0.
-	if r.Enabled && r.TotalMonthlyHigh == 0 && high > 0 {
-		r.TotalMonthlyLow = float64(low) * clusterBlended * HoursPerMonth
-		r.TotalMonthlyHigh = float64(high) * clusterBlended * HoursPerMonth
-	}
+	// Weights sum to 1, so the cluster figure is the source of truth for the total.
+	r.TotalMonthlyLow = clusterMonthlyLow
+	r.TotalMonthlyHigh = clusterMonthlyHigh
 
 	r.Note = note(r, now)
 	return r
