@@ -97,6 +97,8 @@ func sourceLabel(s model.PriceSource) string {
 		return "spot"
 	case model.PriceStatic:
 		return "static"
+	case model.PriceListOffline:
+		return "list"
 	default:
 		return string(s)
 	}

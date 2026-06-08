@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,17 +193,96 @@ func TestSelectProvider(t *testing.T) {
 	awsNodes := []model.NodeInfo{node("p", "m5.large", model.CapacityOnDemand, 4000, gib16)}
 	nonAWS := []model.NodeInfo{{InstanceType: "n1-standard", Region: "europe-west1"}}
 
-	// No AWS look + no config → missing.
-	if p := SelectProvider(ctx, nonAWS, Config{}); p.Backend() != model.PriceMissing {
+	// No primary + list disabled → missing.
+	if p := SelectProvider(ctx, nonAWS, Config{DisableListPrices: true}); p.Backend() != model.PriceMissing {
 		t.Errorf("backend = %v, want missing", p.Backend())
 	}
-	// Static config → static.
+	// No primary + list enabled (default) → offline list backend.
+	if p := SelectProvider(ctx, nonAWS, Config{}); p.Backend() != model.PriceListOffline {
+		t.Errorf("backend = %v, want list-offline", p.Backend())
+	}
+	// Static config → static primary (wins the Backend label even with list layered).
 	if p := SelectProvider(ctx, nonAWS, Config{NodeCost: 0.1}); p.Backend() != model.PriceStatic {
 		t.Errorf("backend = %v, want static", p.Backend())
 	}
 	// AWS-looking nodes but AWS disabled + static config → static (no network).
 	if p := SelectProvider(ctx, awsNodes, Config{DisableAWS: true, NodeCost: 0.1}); p.Backend() != model.PriceStatic {
 		t.Errorf("backend = %v, want static when AWS disabled", p.Backend())
+	}
+}
+
+func TestListProvider(t *testing.T) {
+	ctx := context.Background()
+	p := newListProvider()
+
+	// Known type, us-east-1 baseline (multiplier 1.0).
+	h := p.NodeHourly(ctx, model.NodeInfo{InstanceType: "m5.large", Region: "us-east-1"})
+	if h.Missing || h.Source != model.PriceListOffline || h.USDPerHour <= 0 {
+		t.Fatalf("baseline = %+v, want priced list-offline", h)
+	}
+	base := h.USDPerHour
+	if h.AsOf.IsZero() {
+		t.Error("list price should carry a generated-on date")
+	}
+
+	// Region multiplier applied (eu-central-1 > us-east-1).
+	eu := p.NodeHourly(ctx, model.NodeInfo{InstanceType: "m5.large", Region: "eu-central-1"})
+	if eu.USDPerHour <= base {
+		t.Errorf("eu-central-1 %.4f should exceed baseline %.4f", eu.USDPerHour, base)
+	}
+
+	// Unknown region falls back to baseline (multiplier 1.0).
+	unk := p.NodeHourly(ctx, model.NodeInfo{InstanceType: "m5.large", Region: "moon-1"})
+	if unk.USDPerHour != base {
+		t.Errorf("unknown region = %.4f, want baseline %.4f", unk.USDPerHour, base)
+	}
+
+	// Unknown type misses.
+	if h := p.NodeHourly(ctx, model.NodeInfo{InstanceType: "weird.type", Region: "us-east-1"}); !h.Missing {
+		t.Errorf("unknown type = %+v, want Missing", h)
+	}
+}
+
+func TestFallbackProvider(t *testing.T) {
+	ctx := context.Background()
+	primary := &staticProvider{perType: map[string]float64{"m5.large": 0.05}}
+	f := fallbackProvider{primary: primary, secondary: newListProvider()}
+
+	// Primary hit passes through (and keeps the primary's Backend label).
+	if h := f.NodeHourly(ctx, model.NodeInfo{InstanceType: "m5.large", Region: "us-east-1"}); h.Source != model.PriceStatic || h.USDPerHour != 0.05 {
+		t.Errorf("primary hit = %+v, want 0.05 static", h)
+	}
+	if f.Backend() != model.PriceStatic {
+		t.Errorf("backend = %v, want primary (static)", f.Backend())
+	}
+
+	// Primary miss → secondary fills from the offline list.
+	if h := f.NodeHourly(ctx, model.NodeInfo{InstanceType: "c5.large", Region: "us-east-1"}); h.Missing || h.Source != model.PriceListOffline {
+		t.Errorf("primary miss = %+v, want list-offline fill", h)
+	}
+
+	// Both miss → Missing.
+	if h := f.NodeHourly(ctx, model.NodeInfo{InstanceType: "weird.type", Region: "us-east-1"}); !h.Missing {
+		t.Errorf("both miss = %+v, want Missing", h)
+	}
+}
+
+func TestEstimate_ListOfflineNoteAndEnabled(t *testing.T) {
+	now := time.Date(2026, 6, 4, 0, 0, 0, 0, time.UTC)
+	asOf := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	priced := []PricedNode{
+		{node("p", "m5.large", model.CapacityOnDemand, 4000, gib16), model.NodeHourly{USDPerHour: 0.096, Source: model.PriceListOffline, AsOf: asOf}},
+		{node("p", "m5.large", model.CapacityOnDemand, 4000, gib16), model.NodeHourly{USDPerHour: 0.096, Source: model.PriceListOffline, AsOf: asOf}},
+	}
+	r := Estimate(priced, model.PriceAWSOnDemand, 8000, 2*gib16, now)
+	if !r.Enabled {
+		t.Fatal("list-priced nodes should enable the dollar figure")
+	}
+	if r.ListPriceAsOf.IsZero() {
+		t.Error("ListPriceAsOf should be set from list-priced nodes")
+	}
+	if want := "built-in AWS list prices"; !strings.Contains(r.Note, want) {
+		t.Errorf("note %q should mention %q", r.Note, want)
 	}
 }
 

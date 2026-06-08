@@ -38,8 +38,12 @@ type Config struct {
 	NodeCost    float64       // flat USD/node-hr static fallback
 	CacheDir    string        // on-disk cache directory for AWS lookups
 	CacheTTL    time.Duration // cache freshness (default 24h)
-	DisableAWS  bool          // force the static/missing path (tests, air-gapped)
-	Now         time.Time     // reference time for dating spot prices (injected)
+	DisableAWS  bool          // skip the live AWS backend (tests, air-gapped)
+	// DisableListPrices skips the built-in offline AWS list-price fallback. With it
+	// off (the default) a dollar figure is always shown for AWS instance types even
+	// with no AWS access; with both this and DisableAWS set, pricing is fully missing.
+	DisableListPrices bool
+	Now               time.Time // reference time for dating spot prices (injected)
 }
 
 func (c Config) ttl() time.Duration {
@@ -57,22 +61,55 @@ func (c Config) now() time.Time {
 }
 
 // SelectProvider auto-selects the backend per the rules above. It never returns
-// nil: with no AWS and no static config it returns the missing provider so the
-// caller still gets node/resource savings and a PRICE-MISSING flag.
+// nil. A primary backend is chosen first (live AWS, else static); then, unless
+// disabled, the built-in offline list-price backend is layered behind it so any node
+// the primary cannot price still gets the AWS public on-demand list rate. With no
+// primary and list prices disabled it returns the missing provider, so the caller
+// still gets node/resource savings and a PRICE-MISSING flag.
 func SelectProvider(ctx context.Context, nodes []model.NodeInfo, cfg Config) PriceProvider {
+	var primary PriceProvider
 	if !cfg.DisableAWS && looksAWS(nodes) {
 		if p, err := newAWSProvider(ctx, cfg); err == nil {
-			return p
+			primary = p
 		}
-		// Credentials/config did not resolve — fall through to static/missing.
+		// Credentials/config did not resolve — fall through to static/list/missing.
 	}
-	if cfg.PricingFile != "" || cfg.NodeCost > 0 {
+	if primary == nil && (cfg.PricingFile != "" || cfg.NodeCost > 0) {
 		if p, err := newStaticProvider(cfg); err == nil {
-			return p
+			primary = p
 		}
 	}
-	return missingProvider{}
+
+	if cfg.DisableListPrices {
+		if primary != nil {
+			return primary
+		}
+		return missingProvider{}
+	}
+
+	list := newListProvider()
+	if primary == nil {
+		return list
+	}
+	return fallbackProvider{primary: primary, secondary: list}
 }
+
+// fallbackProvider tries primary, then secondary for any node primary leaves Missing.
+// It reports the primary's backend so output still names the live/static source; the
+// per-node Source on each result keeps labeling honest for filled-in nodes.
+type fallbackProvider struct {
+	primary   PriceProvider
+	secondary PriceProvider
+}
+
+func (f fallbackProvider) NodeHourly(ctx context.Context, node model.NodeInfo) model.NodeHourly {
+	if h := f.primary.NodeHourly(ctx, node); !h.Missing {
+		return h
+	}
+	return f.secondary.NodeHourly(ctx, node)
+}
+
+func (f fallbackProvider) Backend() model.PriceSource { return f.primary.Backend() }
 
 // awsRegion matches an AWS region code (e.g. us-east-1, eu-central-1), used to
 // decide whether the nodes look like AWS before attempting the aws backend.

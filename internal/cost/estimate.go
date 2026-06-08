@@ -98,6 +98,9 @@ func Estimate(priced []PricedNode, backend model.PriceSource, freedCPU, freedMem
 		if pn.Price.AsOf.After(pc.AsOf) {
 			pc.AsOf = pn.Price.AsOf
 		}
+		if pn.Price.Source == model.PriceListOffline && pn.Price.AsOf.After(r.ListPriceAsOf) {
+			r.ListPriceAsOf = pn.Price.AsOf
+		}
 	}
 
 	r.Enabled = clusterPriced > 0
@@ -208,8 +211,8 @@ func nodesSaved(freedCPU, freedMem int64, avgCPU, avgMem float64, total int) (lo
 // note builds the honest caveat line behind the dollar figure.
 func note(r model.CostReport, now time.Time) string {
 	if !r.Enabled {
-		return "no node prices resolved — showing node/resource savings only (PRICE-MISSING). " +
-			"Provide --pricing-file or --node-cost, or grant pricing:GetProducts / ec2:DescribeSpotPriceHistory."
+		return "Provide --pricing-file or --node-cost, or grant " +
+			"pricing:GetProducts / ec2:DescribeSpotPriceHistory for dollar figures."
 	}
 	var parts []string
 	switch {
@@ -223,6 +226,10 @@ func note(r model.CostReport, now time.Time) string {
 	}
 	if r.PriceMissing {
 		parts = append(parts, "some instance types could not be priced (PRICE-MISSING) and are excluded")
+	}
+	if !r.ListPriceAsOf.IsZero() {
+		parts = append(parts, "some nodes priced from built-in AWS list prices (as of "+
+			r.ListPriceAsOf.Format("2006-01")+") — not live, account, or spot")
 	}
 	parts = append(parts, "assumes consolidation of freed capacity")
 	return strings.Join(parts, "; ")

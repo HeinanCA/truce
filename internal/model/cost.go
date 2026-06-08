@@ -11,6 +11,11 @@ const (
 	PriceAWSOnDemand PriceSource = "aws-ondemand"
 	PriceAWSSpot     PriceSource = "aws-spot"
 	PriceStatic      PriceSource = "static"
+	// PriceListOffline is the built-in AWS public on-demand list price, baked into
+	// the binary as a us-east-1 baseline plus per-region multipliers. It is the
+	// last-resort fallback when no live or static price resolves: stable, not
+	// account-specific, and not spot.
+	PriceListOffline PriceSource = "list-offline"
 	PriceMissing     PriceSource = "missing"
 )
 
@@ -65,6 +70,10 @@ type CostReport struct {
 	SpotNodes     int
 	OnDemandNodes int
 	PriceMissing  bool // some node/type could not be priced
+
+	// ListPriceAsOf is the date of the embedded offline list prices when at least
+	// one node was priced from them (zero otherwise), so output can date the caveat.
+	ListPriceAsOf time.Time
 
 	// FreedCPUMilli / FreedMemBytes are the aggregate per-cluster resources the
 	// recommendations free up (always available, even when Enabled is false).
