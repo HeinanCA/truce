@@ -46,6 +46,9 @@ func Render(w io.Writer, r Report, opts Options) error {
 	p := NewPalette(opts.NoColor)
 
 	switch opts.Format {
+	case "summary", "":
+		renderHeader(w, r, p)
+		return renderSummary(w, r, rows, p)
 	case "json":
 		return renderJSON(w, r, rows)
 	case "diff":
@@ -72,7 +75,7 @@ func Render(w io.Writer, r Report, opts Options) error {
 		}
 		renderCost(w, r.Cost, p)
 		return nil
-	case "table", "":
+	case "table":
 		renderHeader(w, r, p)
 		if err := renderTable(w, rows, p, false); err != nil {
 			return err
@@ -80,6 +83,6 @@ func Render(w io.Writer, r Report, opts Options) error {
 		renderCost(w, r.Cost, p)
 		return nil
 	default:
-		return fmt.Errorf("unknown output format %q (want advice|recommend|table|wide|json|diff)", opts.Format)
+		return fmt.Errorf("unknown output format %q (want summary|advice|recommend|table|wide|json|diff)", opts.Format)
 	}
 }

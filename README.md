@@ -89,8 +89,9 @@ kubectl apply -f deploy/rbac.yaml
 ## Usage
 
 ```sh
-kubectl truce                          # current namespace, table output
+kubectl truce                          # current namespace, plain-language summary (money + what to do)
 kubectl truce -A                       # all namespaces
+kubectl truce -n prod -o table         # dense engineering table (verdicts, Δ footprint, flags)
 kubectl truce -n prod -o wide          # per-container detail + util + tolerance
 kubectl truce -A --problems-only       # only SCALE-OUT/IN, HITS CEILING, OOM
 kubectl truce -A --only scale-out,oom  # filter to specific verdicts
@@ -101,7 +102,7 @@ kubectl truce -n prod -o diff          # apply-ready patches (printed, never app
 kubectl truce -A --fail-on scale-out,hits-ceiling,oom-risk
 ```
 
-Flags: `-n/--namespace`, `-A/--all-namespaces`, `-o table|wide|json|diff`,
+Flags: `-n/--namespace`, `-A/--all-namespaces`, `-o summary|advice|recommend|table|wide|json|diff`,
 `--sort delta|name|verdict`, `--only`, `--problems-only`, `--fail-on`,
 `--tolerance`, `--no-color`, `--prometheus`, `--prometheus-window`,
 `--cpu-quantile`. Inherits `--context` / `--kubeconfig`.

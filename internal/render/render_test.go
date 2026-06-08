@@ -103,6 +103,40 @@ func TestRenderDiff(t *testing.T) {
 	}
 }
 
+func TestRenderSummaryIsDefault(t *testing.T) {
+	// Empty format must route to the summary view (the new default), not the table.
+	out := renderTo(t, "")
+	for _, want := range []string{"SAVINGS", "APPLY WITH CARE", "DO NOT APPLY", "Full engineering detail"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default(summary) output missing %q\n---\n%s", want, out)
+		}
+	}
+	// The dense engineering table must NOT be the default body.
+	if strings.Contains(out, "Δ FOOTPRINT") {
+		t.Error("summary should not render the dense table header")
+	}
+	// Plain units only in the summary body — no millicores/Gi jargon.
+	if strings.Contains(out, "500m") || strings.Contains(out, "Gi") {
+		t.Errorf("summary should use plain units, found millicores/Gi\n---\n%s", out)
+	}
+}
+
+func TestRenderSummaryBuckets(t *testing.T) {
+	r := sampleReport()
+	// web is SCALE-OUT with savings → APPLY WITH CARE; api is SCALE-OUT but grows → DO NOT.
+	r.Cost = model.CostReport{Enabled: true, TotalMonthlyLow: 156, TotalMonthlyHigh: 468, FreedCPUMilli: 22090, FreedMemBytes: 35 * 1024 * 1024 * 1024, NodesSavedLow: 1, NodesSavedHigh: 3, Pools: []model.NodePoolCost{{NodeCount: 10}}}
+	var b bytes.Buffer
+	if err := Render(&b, r, Options{Format: "summary", NoColor: true}); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{"Up to $468/month", "range $156–$468", "retire 1–3 of 10 nodes", "GB"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
 func TestUnknownFormat(t *testing.T) {
 	var b bytes.Buffer
 	if err := Render(&b, sampleReport(), Options{Format: "xml"}); err == nil {

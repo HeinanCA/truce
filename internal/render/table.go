@@ -17,6 +17,9 @@ func renderTable(w io.Writer, rows []model.WorkloadAnalysis, p Palette, wide boo
 		return nil
 	}
 
+	fmt.Fprintln(w, p.Dim("Δ FOOTPRINT shows cpu / mem change if the rec is applied; green = savings, red = growth. Predictions are predicted, not confirmed."))
+	fmt.Fprintln(w)
+
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 
 	if wide {

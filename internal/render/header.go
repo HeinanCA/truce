@@ -55,8 +55,6 @@ func renderHeader(w io.Writer, r Report, p Palette) {
 		}
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, p.Dim("Δ FOOTPRINT shows cpu / mem change if the rec is applied; green = savings, red = growth. Predictions are predicted, not confirmed."))
-	fmt.Fprintln(w)
 }
 
 // inPlaceLine summarizes the four detection layers in one honest line.

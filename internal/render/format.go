@@ -41,6 +41,37 @@ func memStr(bytes int64) string {
 	return s + units[i]
 }
 
+// coresStr formats CPU milli-cores as plain cores for the human summary: "1.0",
+// "0.5", "0.09", "0" for zero. Whole/large values get one decimal; sub-core gets two.
+func coresStr(milli int64) string {
+	if milli == 0 {
+		return "0"
+	}
+	c := float64(milli) / 1000
+	if c >= 1 {
+		return fmt.Sprintf("%.1f", c)
+	}
+	return fmt.Sprintf("%.2f", c)
+}
+
+// gbStr formats a byte count as plain gigabytes for the human summary: "2 GB",
+// "0.8 GB", "0.25 GB", "0" for zero. Uses GiB magnitude with the friendlier "GB"
+// label; one decimal at/above 1 GB, two below.
+func gbStr(bytes int64) string {
+	if bytes == 0 {
+		return "0"
+	}
+	g := float64(bytes) / (1024 * 1024 * 1024)
+	var s string
+	if g >= 1 {
+		s = fmt.Sprintf("%.1f", g)
+	} else {
+		s = fmt.Sprintf("%.2f", g)
+	}
+	s = strings.TrimSuffix(s, ".0")
+	return s + " GB"
+}
+
 // resourceStr renders a per-replica CPU/memory pair, e.g. "500m / 512Mi", using
 // "—" for an unset dimension and overall when nothing is set.
 func resourceStr(cpuMilli, memBytes int64, hasCPU, hasMem bool) string {

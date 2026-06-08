@@ -43,10 +43,11 @@ type options struct {
 	service       string
 	valuesPath    string
 
-	pricingFile string
-	nodeCost    float64
-	noPricing   bool
-	cacheTTLHrs float64
+	pricingFile  string
+	nodeCost     float64
+	noPricing    bool
+	noListPrices bool
+	cacheTTLHrs  float64
 }
 
 // gateError signals that --fail-on matched; main maps it to a distinct exit code
@@ -61,7 +62,7 @@ func (e *gateError) Error() string {
 func newRootCommand() *cobra.Command {
 	o := &options{
 		configFlags: genericclioptions.NewConfigFlags(true),
-		output:      "table",
+		output:      "summary",
 		tolerance:   engine.DefaultTolerance,
 	}
 
@@ -83,7 +84,7 @@ func newRootCommand() *cobra.Command {
 
 	f := cmd.Flags()
 	f.BoolVarP(&o.allNamespaces, "all-namespaces", "A", false, "scan all namespaces")
-	f.StringVarP(&o.output, "output", "o", "table", "output format: recommend|advice|table|wide|json|diff")
+	f.StringVarP(&o.output, "output", "o", "summary", "output format: summary|advice|recommend|table|wide|json|diff")
 	f.StringVar(&o.sortMode, "sort", "", "sort order: delta|name|verdict (default: problems first)")
 	f.StringSliceVar(&o.only, "only", nil, "show only these verdicts (comma-separated)")
 	f.BoolVar(&o.problemsOnly, "problems-only", false, "show only problem verdicts")
@@ -99,7 +100,8 @@ func newRootCommand() *cobra.Command {
 	f.BoolVar(&o.setCPULimit, "set-cpu-limit", false, "also recommend a CPU limit = ceil(cpu_max × 1.5) (default: leave unset for burst)")
 	f.StringVar(&o.pricingFile, "pricing-file", "", "static instanceType→USD/hr map (YAML/JSON) for non-AWS clusters; AWS pricing is built in and auto-selected")
 	f.Float64Var(&o.nodeCost, "node-cost", 0, "flat USD/node-hr static fallback when no per-type or AWS price is available")
-	f.BoolVar(&o.noPricing, "no-pricing", false, "skip the AWS pricing backend (use static/PRICE-MISSING only)")
+	f.BoolVar(&o.noPricing, "no-pricing", false, "skip the live AWS pricing backend (built-in offline list prices still apply unless --no-list-prices)")
+	f.BoolVar(&o.noListPrices, "no-list-prices", false, "skip the built-in offline AWS list-price fallback (with --no-pricing, forces PRICE-MISSING)")
 	f.Float64Var(&o.cacheTTLHrs, "pricing-cache-ttl", 24, "hours to cache AWS price lookups on disk")
 	f.StringVar(&o.service, "service", "", "recommend HPA-aware, OOM-safe request values for a single workload by name")
 	f.StringVar(&o.valuesPath, "values", "", "path to that service's values file; shows current→recommended as a diff (read-only)")
@@ -305,12 +307,13 @@ func basisStatus(rows []model.WorkloadAnalysis, o *options, configured, reachabl
 func buildCostReport(ctx context.Context, o *options, infos []model.NodeInfo, rows []model.WorkloadAnalysis) model.CostReport {
 	now := time.Now()
 	cfg := cost.Config{
-		PricingFile: o.pricingFile,
-		NodeCost:    o.nodeCost,
-		CacheDir:    pricingCacheDir(),
-		CacheTTL:    time.Duration(o.cacheTTLHrs * float64(time.Hour)),
-		DisableAWS:  o.noPricing,
-		Now:         now,
+		PricingFile:       o.pricingFile,
+		NodeCost:          o.nodeCost,
+		CacheDir:          pricingCacheDir(),
+		CacheTTL:          time.Duration(o.cacheTTLHrs * float64(time.Hour)),
+		DisableAWS:        o.noPricing,
+		DisableListPrices: o.noListPrices,
+		Now:               now,
 	}
 	// Pricing gets its own budget rather than the leftover scraps of the shared
 	// scan deadline: a 7d Prometheus enrich can eat most of it, starving the last
